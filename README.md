@@ -1,0 +1,88 @@
+# Season Wins Over/Under (NBA 2026–27)
+
+A small web page for a friend group. Everyone picks **Over** or **Under** on all 30 NBA win totals before opening night. A live leaderboard scores everyone as the season goes. There are no accounts: each player gets a random **edit code** instead.
+
+- **Site:** plain HTML/CSS/JS with no build step, hosted free on **GitHub Pages**.
+- **Shared data:** **Firebase Realtime Database**, free "Spark" plan. Security comes from `database.rules.json`, which the database enforces itself.
+- **Standings:** a GitHub Action fetches the W–L records (ESPN first, NBA.com as backup) and commits `standings.json`. The admin can also enter standings by hand.
+- **Picks lock:** Tue **Oct 20, 2026 at 2:55 PM ET**, five minutes before the first tip-off (Celtics at Pistons, 3:00 PM ET on NBC). The database enforces the lock, so changing the page code can't get around it. The admin can still edit afterwards.
+
+---
+
+## One-time setup (about 15 minutes)
+
+### 1. Firebase (the shared database)
+1. Go to <https://console.firebase.google.com> and sign in with a Google account.
+2. **Create a project.** Any name works, e.g. `season-wins`. Google Analytics is optional; turn it off.
+3. In the left menu: **Build → Realtime Database → Create Database**. Choose a US location and **Start in locked mode**.
+4. Open the **Rules** tab. Delete what's there, paste the whole contents of [`database.rules.json`](database.rules.json), and press **Publish**.
+5. Click the gear icon, then **Project settings**. Under **Your apps**, click the `</>` (Web) icon and register an app with any nickname. Don't set up Hosting. Firebase then shows a `firebaseConfig = { … }` block.
+6. Put that block into [`js/firebase-config.js`](js/firebase-config.js), replacing `null`. Make sure it includes the `databaseURL` line. The config is meant to be public; the rules are what protect the game.
+
+### 2. GitHub (hosting and the weekly standings job)
+1. Create a **public** repository, e.g. `season-wins`. Free GitHub Pages needs a public repo.
+2. Push this folder to it (or ask Claude to).
+3. In the repo, go to **Settings → Pages → Build and deployment → Source** and choose **GitHub Actions**.
+4. Go to **Settings → Actions → General → Workflow permissions** and choose **Read and write permissions**. This lets the bot commit `standings.json`.
+5. Go to the **Actions** tab, open **Standings + deploy**, and click **Run workflow**. Tick **dry run** the first time: it checks that the standings feeds work without saving anything. Then run it again without dry run.
+6. Your link is `https://<your-github-name>.github.io/<repo-name>/`.
+
+### 3. Become the admin (do this before sharing the link)
+1. Open `<your link>#/admin`, expand **First-time setup**, and press **Claim admin**. Only the first person to press it becomes admin, ever.
+2. **Save the admin code** it shows. If you lose it, see "Admin code lost" below.
+3. In the admin page, check every line against FanDuel and fix any that differ. The seed lines come from **Fanatics (Oct 15)**, not FanDuel. Lines must end in .5.
+
+### 4. Share the link in the group chat 🎉
+
+---
+
+## Day-to-day
+
+| Task | How |
+|---|---|
+| Change how often standings update | Edit the one `cron:` line at the top of [`.github/workflows/site.yml`](.github/workflows/site.yml). Weekly is `"17 10 * * 1"`; daily is `"17 10 * * *"` (times are UTC). |
+| Update standings right now | **Actions → Standings + deploy → Run workflow** |
+| The feed broke | GitHub emails you when the job fails. Meanwhile go to **Admin → Standings by hand**. The newer of your manual entry and the automatic feed always wins. |
+| Someone lost their edit code | **Admin → Players → Reset code**, then send them the new code |
+| Fix a name / remove a player | **Admin → Players → Rename / Delete** |
+| Edit someone's picks after the lock | **Admin → Players → Edit picks** |
+| Opening night moves | **Admin → Lock time** |
+
+The page warns "Standings are more than 9 days old" if the feed has stopped. The warning only appears after the lock.
+
+GitHub pauses scheduled jobs in repos with no activity for 60 days. The weekly standings commits count as activity, so this shouldn't happen during the season.
+
+### Admin code lost
+In the Firebase console, open **Realtime Database → Data**, delete the `secrets → admin` entry, then claim admin again at `#/admin`.
+
+---
+
+## How the security works (no accounts)
+
+- When you join, your browser creates a random 12-character code, such as `K7QM-3XRT-9PWD`. That is about 59 bits of randomness, far too many combinations to guess. Only its **SHA-256 hash** goes to the database, at `secrets/<player>`, and **nobody can read** that location.
+- Every save of your picks also writes a proof to `proofs/<player>/<hash>`, stamped with the server's clock. The rules accept the pick change only if a proof exists at the path named by *your* stored hash, stamped at *this exact moment*. Only someone who knows the code can produce that path. Old proofs can't be reused, and nobody can read them.
+- The rules also enforce: names unique regardless of capitalization (2–24 characters), picks only `O`/`U` for real teams, no new players or pick changes after the lock (except by the admin), and only the admin can change lines, the lock time, manual standings, or players.
+- Picks are hidden on the page until the lock, but they are not secret. Someone technical could read them from the database before the lock.
+
+## Scoring
+Pure functions in [`js/scoring.js`](js/scoring.js), tested in [`tests/scoring.test.js`](tests/scoring.test.js).
+
+- expected = line × GP / 82
+- delta = W − expected
+- projected = W / GP × 82
+- **Over clinched** when W > line; **Under clinched** when W + remaining < line.
+- Pick status: **✓ locked in** / **✕ out of reach** once clinched; otherwise **▲ on pace** / **▼ behind** depending on the sign of delta; **– even** when delta = 0.
+- Score = locked in + on pace. Sort by that, then by locked in, then fewest out of reach, then name. Players tied on (score, locked in) share a rank.
+- Season progress = (sum of GP) ÷ 2 out of 1,230 games.
+
+## Developer notes
+```
+npm install            # only needed for the rules tests
+npm test               # scoring, team-name mapping, feed parsers
+npm run test:rules     # rebuilds database.rules.json, runs it in the Firebase emulator (needs Java)
+npm run rules          # rebuild database.rules.json after editing scripts/build-rules.mjs
+node scripts/fetch-standings.mjs --dry-run   # try the live feeds
+```
+Local preview against the emulator: run `npx firebase emulators:start --only database --project demo-swou`, serve the folder (e.g. `npx serve .`), and open `http://localhost:3000/?emulator`.
+
+Team-name mapping lives in [`js/teams.js`](js/teams.js). It knows ESPN's `GS`, `NY`, `NO`, `SA`, `UTAH`, `WSH` and both "LA"/"Los Angeles" spellings. Any unknown name stops the standings job with an error rather than guessing.

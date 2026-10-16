@@ -1,0 +1,69 @@
+name: Standings + deploy
+
+on:
+  schedule:
+    # ▼▼ STANDINGS SCHEDULE: the one line to change (times are UTC) ▼▼
+    - cron: "17 10 * * 1"        # weekly, Mondays 10:17 UTC (6:17 AM ET). Daily: "17 10 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Only test the standings feeds (don't save)"
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: site
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: node --test tests/scoring.test.js tests/teams.test.js tests/fetch.test.js
+
+  standings:
+    if: github.event_name != 'push'
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Fetch standings
+        run: node scripts/fetch-standings.mjs ${{ inputs.dry_run && '--dry-run' || '' }}
+      - name: Commit standings.json
+        if: ${{ !inputs.dry_run }}
+        run: |
+          git config user.name "standings-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add standings.json
+          git commit -m "Update standings" && git push || echo "Nothing to commit"
+
+  deploy:
+    needs: [test, standings]
+    if: ${{ !cancelled() && needs.test.result == 'success' && needs.standings.result != 'failure' && !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: main }
+      - name: Collect site files
+        run: |
+          mkdir _site
+          cp -r index.html css js standings.json _site/
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+      - id: deployment
+        uses: actions/deploy-pages@v4
