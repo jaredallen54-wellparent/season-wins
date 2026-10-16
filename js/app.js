@@ -300,7 +300,7 @@ function codeShownView() {
     <div class="card"><p>Your edit code:</p>
     <p class="code">${esc(code)}</p>
     <button class="btn ghost" data-copy="${esc(code)}">Copy code</button>
-    <p class="warnbox">Save this somewhere (a note, or message it to yourself). You need it to edit your picks from another device. It won't be shown again.</p>
+    <p class="warnbox">Save this somewhere (a note, or message it to yourself). This device remembers it, but you'll need it to sign in on any other phone or computer.</p>
     <a class="btn primary" href="${next}" data-done-code>I saved it, continue</a></div>`;
 }
 function signinView() {
@@ -346,7 +346,7 @@ function picksView(pid) {
       <div class="pk-head"><span><b>${esc(S.db.players[pid].name)}</b> · ${n} of 30 picked</span><span role="status">${save}</span></div>
       <div class="pk-list">${rows}</div>
     </div>
-    <p class="note" style="margin-top:14px">${asAdmin ? '<a href="#/admin">Back to admin</a>' : `Playing as ${esc(S.db.players[pid].name)} · <button class="link" data-signout>Sign out on this device</button>`}</p>`;
+    <p class="note" style="margin-top:14px">${asAdmin ? '<a href="#/admin">Back to admin</a>' : `Playing as ${esc(S.db.players[pid].name)} · <button class="link" data-show-code="me">Show my edit code</button> · <button class="link" data-signout>Sign out on this device</button>`}</p>`;
 }
 
 let saveTimer = null;
@@ -419,7 +419,7 @@ function adminView() {
   const localIso = new Date(lock.getTime() - lock.getTimezoneOffset() * 6e4).toISOString().slice(0, 16);
   const ps = players().sort(byName);
   const teamsAZ = [...TEAMS].sort((a, b) => a.name.localeCompare(b.name));
-  return `<div class="sec-head"><h2>Admin</h2><p class="hint">Signed in as admin on this device. <button class="link" data-admin-signout>Sign out</button></p></div>
+  return `<div class="sec-head"><h2>Admin</h2><p class="hint">Signed in as admin on this device. <button class="link" data-show-code="admin">Show my admin code</button> · <button class="link" data-admin-signout>Sign out</button></p></div>
 
     <div class="card"><h3>Win total lines</h3>
       <p class="warnbox">Seeded from Fanatics (Oct 15), not FanDuel. Check each against FanDuel and fix it here before the lock. Every line must end in .5.</p>
@@ -472,14 +472,14 @@ function render({ live = false } = {}) {
   document.querySelectorAll('.tab').forEach(t => t.toggleAttribute('aria-current', t.dataset.tab === (TAB_OF[page] || 'board')));
   document.querySelectorAll('.tab[aria-current]').forEach(t => t.setAttribute('aria-current', 'page'));
   if (!S.dbReady && !S.dbError) { $app.innerHTML = '<p class="loading">Loading…</p>'; return; }
-  const view = { board: boardView, join: joinView, signin: signinView, picks: () => picksView(arg), rules: rulesView, admin: adminView }[page] || boardView;
+  const view = S.shownCode ? codeShownView : { board: boardView, join: joinView, signin: signinView, picks: () => picksView(arg), rules: rulesView, admin: adminView }[page] || boardView;
   const y = window.scrollY;
   const open = [...$app.querySelectorAll('details[open][data-pid]')].map(d => d.dataset.pid);
   $app.innerHTML = view();
   open.forEach(id => { const d = $app.querySelector(`details[data-pid="${id}"]`); if (d) d.open = true; });
   window.scrollTo(0, y);
 }
-addEventListener('hashchange', () => { S.saveState = ''; S.confirmDelete = null; render(); window.scrollTo(0, 0); });
+addEventListener('hashchange', () => { S.saveState = ''; S.confirmDelete = null; S.shownCode = null; render(); window.scrollTo(0, 0); });
 
 // ---------- events ----------
 $app.addEventListener('click', async e => {
@@ -490,6 +490,11 @@ $app.addEventListener('click', async e => {
     queuePick(pid, b.dataset.pick, b.dataset.v);
   } else if (b.dataset.conf) {
     S.ui.conf = b.dataset.conf; store.set('swou:ui', S.ui); render();
+  } else if (b.dataset.showCode) {
+    const raw = b.dataset.showCode === 'admin' ? S.adminCode : S.me?.code;
+    const code = normalizeCode(raw).replace(/(.{4})(?=.)/g, '$1-');
+    S.shownCode = { code, title: b.dataset.showCode === 'admin' ? 'Your admin code' : 'Your edit code', next: location.hash || '#/' };
+    render(); window.scrollTo(0, 0);
   } else if ('copy' in b.dataset) {
     copy(b.dataset.copy);
   } else if ('doneCode' in b.dataset) {
@@ -503,7 +508,7 @@ $app.addEventListener('click', async e => {
     try {
       const code = await api.claimAdmin();
       S.adminCode = code; store.set('swou:admin', code);
-      await api.setLines(code, DEFAULT_LINES); // seed lines so they're visible and editable
+      if (!S.db.lines) await api.setLines(code, DEFAULT_LINES); // seed lines once; never overwrite edits
       S.shownCode = { code, title: "You're the admin", next: '#/admin' };
       render();
     } catch (err) { toast(err instanceof UserError ? err.message : 'Failed: ' + err.message); }
