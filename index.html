@@ -7,16 +7,31 @@
   <meta name="description" content="Pick over or under on every NBA team's 2026–27 win total. Live leaderboard for our group.">
   <meta property="og:title" content="Season Wins Over/Under 2026–27">
   <meta property="og:description" content="Pick O/U on all 30 NBA win totals. Live leaderboard.">
-  <meta name="theme-color" content="#f9f9f7" media="(prefers-color-scheme: light)">
-  <meta name="theme-color" content="#0d0d0d" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#6A34AE">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏀</text></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@700;800&family=Public+Sans:wght@400;500;600;700&display=swap">
   <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
-  <main id="app" aria-live="polite"><p class="loading">Loading…</p></main>
-  <footer class="foot">
-    <a href="#/">Board</a> · <a href="#/picks">My picks</a> · <a href="#/rules">How it works</a> · <a href="#/admin">Admin</a>
-  </footer>
+  <header class="jersey">
+    <div class="page mast" id="mast">
+      <div>
+        <p class="eyebrow">NBA 2026–27 · 82 games</p>
+        <h1>Season Wins Over/Under</h1>
+      </div>
+    </div>
+  </header>
+  <div class="page">
+    <nav class="tabs" aria-label="Sections">
+      <a class="tab" href="#/" data-tab="board">Board</a>
+      <a class="tab" href="#/picks" data-tab="picks">My picks</a>
+      <a class="tab" href="#/rules" data-tab="rules">How it works</a>
+      <a class="tab" href="#/admin" data-tab="admin">Admin</a>
+    </nav>
+    <main id="app" aria-live="polite"><p class="loading">Loading…</p></main>
+  </div>
   <script type="module" src="js/app.js"></script>
 </body>
 </html>

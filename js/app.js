@@ -3,12 +3,13 @@ import {
   getDatabase, connectDatabaseEmulator, ref, update, get, onValue, serverTimestamp,
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-database.js';
 import { firebaseConfig } from './firebase-config.js';
-import { TEAMS, TEAM_BY_CODE, DEFAULT_LINES, DEFAULT_LOCK_AT, SEASON_LABEL, GAMES_PER_TEAM } from './teams.js';
+import { TEAMS, DEFAULT_LINES, DEFAULT_LOCK_AT, GAMES_PER_TEAM, LEAGUE_GAMES } from './teams.js';
 import { teamPace, pickStatus, leaderboard, seasonProgress } from './scoring.js';
 import { makeApi, UserError, normalizeCode } from './api.js';
 
 // ---------- setup ----------
 const $app = document.getElementById('app');
+const $mast = document.getElementById('mast');
 const isLocal = ['localhost', '127.0.0.1'].includes(location.hostname);
 const useEmulator = isLocal && new URLSearchParams(location.search).has('emulator');
 const config = useEmulator
@@ -16,9 +17,9 @@ const config = useEmulator
   : firebaseConfig;
 
 if (!config) {
-  $app.innerHTML = `<section class="card"><h1>Almost there</h1>
-    <p>This site isn't connected to a database yet. Paste your Firebase config into
-    <code>js/firebase-config.js</code> (see the README).</p></section>`;
+  $app.innerHTML = `<div class="card"><h3>Almost there</h3>
+    <p class="note">This site isn't connected to a database yet. Paste your Firebase config into
+    <code>js/firebase-config.js</code> (see the README).</p></div>`;
   throw new Error('No Firebase config');
 }
 const db = getDatabase(initializeApp(config));
@@ -41,22 +42,21 @@ const S = {
   pending: {},              // pid -> {team: 'O'|'U'|null} not yet saved
   saveState: '',            // '', 'saving', 'saved', or an error message
   shownCode: null,          // code to show once after join/claim/reset
-  ui: store.get('swou:ui') || { conf: 'All', sort: 'line' },
+  confirmDelete: null,
+  ui: { conf: 'All', sort: 'line', ...(store.get('swou:ui') || {}) },
 };
 
 const lines = () => ({ ...DEFAULT_LINES, ...(S.db.lines || {}) });
 const lockAt = () => S.db.config?.lockAt ?? DEFAULT_LOCK_AT;
 const isLocked = () => Date.now() >= lockAt();
-const players = () => Object.entries(S.db.players || {}).map(([id, p]) => ({
-  id, name: p.name, picks: { ...(S.db.picks?.[id] || {}), ...stripNulls(S.pending[id]) },
-  pendingClears: S.pending[id] || {},
-}));
-function stripNulls(o) { return Object.fromEntries(Object.entries(o || {}).filter(([, v]) => v)); }
 function picksFor(pid) {
   const p = { ...(S.db.picks?.[pid] || {}) };
   for (const [t, v] of Object.entries(S.pending[pid] || {})) { if (v) p[t] = v; else delete p[t]; }
   return p;
 }
+const players = () => Object.entries(S.db.players || {}).map(([id, p]) => ({ id, name: p.name, picks: picksFor(id) }));
+const byName = (a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+const meJoined = () => !!(S.me && S.db.players?.[S.me.id]);
 
 /** Newer of the automatic feed and the admin's hand-entered standings. */
 function standings() {
@@ -72,247 +72,271 @@ const fmt1 = n => (Math.round(n * 10) / 10).toFixed(1);
 const fmtDate = (ms, tz) => new Date(ms).toLocaleString(undefined, {
   weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: tz, timeZoneName: 'short',
 });
-const STATUS = {
-  won: { icon: '✓', label: 'locked in' },
-  ahead: { icon: '▲', label: 'on pace' },
-  even: { icon: '–', label: 'even' },
-  behind: { icon: '▼', label: 'behind' },
-  lost: { icon: '✕', label: 'out of reach' },
-};
+const lockText = () => fmtDate(lockAt(), 'America/New_York');
+const GLYPH = { won: '✓', ahead: '▲', even: '–', behind: '▼', lost: '✕' };
+const WORD = { won: 'locked in', ahead: 'on pace', even: 'even', behind: 'behind pace', lost: 'out of reach' };
+const SHORT = { won: 'locked', ahead: 'on pace', even: 'even', behind: 'behind', lost: 'out' };
 const ORDER = ['won', 'ahead', 'even', 'behind', 'lost'];
-const SOURCE_NAMES = { espn: 'ESPN', nbaSchedule: 'NBA.com', manual: 'entered by admin', seed: 'not yet fetched' };
+const SOURCE_NAMES = { espn: 'ESPN', nbaSchedule: 'NBA.com', manual: 'entered by admin', seed: 'season not started' };
+const glyph = s => `<i class="glyph s-${s}" aria-hidden="true">${GLYPH[s]}</i>`;
 
 function toast(msg) {
   let t = document.querySelector('.toast');
   if (!t) { t = document.createElement('div'); t.className = 'toast'; t.setAttribute('role', 'status'); document.body.append(t); }
   t.textContent = msg; t.classList.add('show');
-  clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove('show'), 2200);
+  clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove('show'), 2600);
 }
 async function copy(text) {
   try { await navigator.clipboard.writeText(text); toast('Copied'); }
   catch { prompt('Copy this:', text); }
 }
 
-// ---------- views ----------
-function masthead() {
+// ---------- masthead ----------
+function renderMast() {
   const st = standings();
   const prog = seasonProgress(st.teams);
   const pct = Math.round(prog.pct * 1000) / 10;
   const stale = isLocked() && st.at && (Date.now() - st.at) > STALE_DAYS * 864e5;
-  const updated = st.at ? `${fmtDate(st.at)} · ${esc(SOURCE_NAMES[st.source] || st.source)}` : 'not yet';
-  return `<header class="mast">
-    <p class="kicker">NBA ${SEASON_LABEL}</p>
-    <h1>Season Wins Over/Under</h1>
-    <div class="progress" role="img" aria-label="Season ${pct}% complete, ${prog.games} of 1,230 games">
-      <div class="progress-fill" style="width:${prog.pct * 100}%"></div>
+  const lockLine = isLocked() ? `Picks locked ${lockText()}` : `Picks lock ${lockText()}${countdown()}`;
+  const upd = st.at && st.source !== 'seed' ? `Standings updated ${fmtDate(st.at)} (${esc(SOURCE_NAMES[st.source] || st.source)})` : '';
+  $mast.innerHTML = `<div>
+      <p class="eyebrow">NBA 2026–27 · 82 games</p>
+      <h1>Season Wins Over/Under</h1>
+      <p class="sub">${lockLine}</p>
+      ${stale ? `<p class="sub stale">⚠ Standings are more than ${STALE_DAYS} days old. ${upd}</p>` : upd ? `<p class="sub">${upd}</p>` : ''}
     </div>
-    <p class="progress-label"><strong>${pct}%</strong> · ${prog.games.toLocaleString()} of 1,230 games</p>
-    <p class="updated ${stale ? 'stale' : ''}">${stale ? '⚠ Standings are more than 9 days old. ' : ''}Standings updated ${updated}</p>
-  </header>`;
-}
-
-function cta() {
-  const locked = isLocked();
-  const lockLine = locked
-    ? `<p class="lockline">🔒 Picks locked ${fmtDate(lockAt(), 'America/New_York')}</p>`
-    : `<p class="lockline">Picks lock <strong>${fmtDate(lockAt(), 'America/New_York')}</strong>${countdown()}</p>`;
-  if (S.me && S.db.players?.[S.me.id]) {
-    const n = Object.keys(picksFor(S.me.id)).length;
-    return `<section class="cta">${lockLine}
-      <a class="btn primary" href="#/picks">${locked ? 'View my picks' : 'Edit my picks'} · ${n} of 30</a>
-      <span class="who">Playing as <strong>${esc(S.db.players[S.me.id].name)}</strong></span></section>`;
-  }
-  if (locked) return `<section class="cta">${lockLine}</section>`;
-  return `<section class="cta">${lockLine}
-    <a class="btn primary" href="#/join">Join the game</a>
-    <a class="btn ghost" href="#/signin">I already joined</a></section>`;
+    <div class="progress">
+      <div class="progress-top"><span>Season elapsed</span><span><b>${pct}%</b> · ${prog.games.toLocaleString()} of ${LEAGUE_GAMES.toLocaleString()} games</span></div>
+      <div class="ptrack" role="img" aria-label="${pct} percent of the regular season played"><span style="width:${prog.pct * 100}%"></span></div>
+    </div>`;
 }
 function countdown() {
   const ms = lockAt() - Date.now();
   if (ms <= 0 || ms > 14 * 864e5) return '';
   const d = Math.floor(ms / 864e5), h = Math.floor(ms / 36e5) % 24, m = Math.floor(ms / 6e4) % 60;
-  return ` · in ${d ? d + 'd ' : ''}${h}h ${m}m`;
+  return ` · ${d ? d + 'd ' : ''}${h}h ${m}m to go`;
 }
 
-function legend() {
-  return `<ul class="legend" aria-label="Legend">${ORDER.map(s =>
-    `<li><span class="sw s-${s}" aria-hidden="true"></span>${STATUS[s].icon} ${STATUS[s].label}</li>`).join('')}</ul>`;
+// ---------- board ----------
+function introView() {
+  const locked = isLocked();
+  let cta;
+  if (meJoined()) {
+    const n = Object.keys(picksFor(S.me.id)).length;
+    cta = `<a class="btn primary" href="#/picks">${locked ? 'View my picks' : 'Edit my picks'} · ${n} of 30</a>
+      <span>Playing as <b>${esc(S.db.players[S.me.id].name)}</b></span>`;
+  } else if (!locked) {
+    cta = `<a class="btn primary" href="#/join">Join the game</a><a class="btn ghost" href="#/signin">I already joined</a>
+      <span>No account needed, just a name.</span>`;
+  } else {
+    cta = `<span>Picks are locked for the season. Follow along below.</span>`;
+  }
+  return `<section class="intro" aria-labelledby="intro-h">
+    <div class="intro-head"><h2 id="intro-h">How it works</h2><a class="small" href="#/rules">Full rules</a></div>
+    <ol class="steps">
+      <li><div><b>Pick all 30 teams</b>Each team has a win-total line, like 47.5. Pick Over or Under for every team.</div></li>
+      <li><div><b>Picks lock at tip-off</b>${lockText()}. After that, nobody can change them.</div></li>
+      <li><div><b>Track it all season</b>Your score is picks locked in plus picks on pace. At season's end, the most correct picks wins.</div></li>
+    </ol>
+    <div class="intro-cta">${cta}</div>
+  </section>`;
+}
+
+function bannersView() {
+  const st = standings();
+  const games = seasonProgress(st.teams).games;
+  let out = '';
+  if (S.dbError) out += `<div class="banner"><b>Can't reach the database.</b> ${esc(S.dbError)}</div>`;
+  if (games === 0) out += `<div class="banner"><b>The season hasn't tipped off.</b> Every team is 0–0, so every pick shows as even until games are played.${isLocked() ? '' : ' Everyone\'s picks stay hidden until the lock.'}</div>`;
+  return out;
+}
+
+function keyView() {
+  return `<ul class="key" aria-label="Pick status key">${ORDER.map(s => `<li>${glyph(s)}${WORD[s][0].toUpperCase() + WORD[s].slice(1)}</li>`).join('')}</ul>`;
 }
 
 function leaderboardView() {
   const ps = players();
-  if (!ps.length) return `<section class="card"><h2>Leaderboard</h2><p class="muted">No one has joined yet. Be first!</p></section>`;
+  const head = `<div class="sec-head"><h2>Leaderboard</h2>
+    <p class="hint">A pick is on track while its team is ahead of the pace its line needs (Over) or behind it (Under). It's locked in once the result can't change.</p></div>`;
+  if (!ps.length) return head + `<ol class="lb"><li class="empty"><b>No players yet</b>Be the first: tap Join the game above.</li></ol>`;
   const st = standings();
   const rows = leaderboard(lines(), st.teams, ps);
   const locked = isLocked();
   const items = rows.map(r => {
-    const segs = ORDER.filter(s => r.counts[s]).map(s =>
-      `<span class="seg s-${s}" style="flex:${r.counts[s]}" title="${STATUS[s].label}: ${r.counts[s]}"></span>`).join('');
-    const gap = r.counts.unpicked ? `<span class="seg s-none" style="flex:${r.counts.unpicked}" title="not picked: ${r.counts.unpicked}"></span>` : '';
-    const counts = ORDER.map(s => `<span class="c c-${s}" title="${STATUS[s].label}"><b aria-hidden="true">${STATUS[s].icon}</b> ${r.counts[s]}<span class="sr"> ${STATUS[s].label}</span></span>`).join('')
-      + (r.counts.unpicked ? `<span class="c">${r.counts.unpicked} unpicked</span>` : '');
-    const mine = S.me?.id === r.id ? ' mine' : '';
-    const detail = locked ? playerDetail(r, st) : `<p class="muted small">Picks are hidden until the lock. ${30 - r.counts.unpicked} of 30 picked.</p>`;
-    return `<li class="lb-row${mine}">
-      <details><summary>
-        <span class="rank">${r.rank}</span>
-        <span class="lb-main">
-          <span class="lb-name">${esc(r.name)}</span>
-          <span class="lb-score"><strong>${r.onTrack}</strong> of 30 picks on track</span>
-          <span class="stack" role="img" aria-label="${ORDER.map(s => `${r.counts[s]} ${STATUS[s].label}`).join(', ')}">${segs}${gap}</span>
-          <span class="counts">${counts}</span>
-        </span>
-      </summary>${detail}</details></li>`;
+    const c = r.counts;
+    const picked = 30 - c.unpicked;
+    const segs = ORDER.map(s => c[s] ? `<span class="sg-${s}" style="flex:${c[s]}"></span>` : '').join('')
+      + (c.unpicked ? `<span class="sg-none" style="flex:${c.unpicked}"></span>` : '');
+    const counts = ORDER.map(s => `<span>${glyph(s)}<b>${c[s]}</b> ${SHORT[s]}</span>`).join('')
+      + (c.unpicked ? `<span>${c.unpicked} unpicked</span>` : '');
+    const you = S.me?.id === r.id ? ' <small>(you)</small>' : '';
+    const row = `<div class="lb-row"><div class="rk" aria-label="Rank ${r.rank}">${r.rank}</div><div style="min-width:0">
+        <div class="lb-top"><span class="lb-name">${esc(r.name)}${you}</span><span class="lb-score"><b>${r.onTrack}</b>of 30 picks on track</span></div>
+        <div class="stack" role="img" aria-label="${ORDER.map(s => `${c[s]} ${WORD[s]}`).join(', ')}${c.unpicked ? `, ${c.unpicked} unpicked` : ''}">${segs}</div>
+        <div class="lb-counts">${counts}</div></div></div>`;
+    if (!locked) return `<li>${row}<p class="note" style="padding:0 18px 14px 70px;margin:0">${picked} of 30 picked · picks revealed at the lock</p></li>`;
+    return `<li><details data-pid="${r.id}"><summary>${row}</summary>${playerDetail(r)}</details></li>`;
   }).join('');
-  return `<section class="card"><h2>Leaderboard</h2>${legend()}<ol class="lb">${items}</ol>
-    <p class="muted small">On track = locked in + on pace. Tap a name to see their picks.</p></section>`;
+  return head + keyView() + `<ol class="lb">${items}</ol>`;
 }
 
-function playerDetail(r, st) {
+function playerDetail(r) {
   const L = lines();
+  const pk = picksFor(r.id);
   const groups = ORDER.map(s => {
-    const teams = Object.entries(r.statuses).filter(([, v]) => v === s).map(([c]) => c);
+    const teams = Object.entries(r.statuses).filter(([, v]) => v === s).map(([c]) => c).sort();
     if (!teams.length) return '';
-    return `<p class="pd"><span class="c c-${s}"><b>${STATUS[s].icon}</b> ${STATUS[s].label}</span> ${teams.map(c =>
-      `<span class="chip">${c} ${players().find(p => p.id === r.id).picks[c]} ${L[c]}</span>`).join(' ')}</p>`;
+    return `<div class="grp"><span class="grp-l">${WORD[s]}</span>${teams.map(c =>
+      `<span class="chip s-${s}" title="${c} ${pk[c] === 'O' ? 'Over' : 'Under'} ${L[c]}"><i aria-hidden="true">${GLYPH[s]}</i><span>${c} ${pk[c]} ${L[c]}</span></span>`).join('')}</div>`;
   }).join('');
-  return `<div class="detail">${groups || '<p class="muted small">No picks.</p>'}</div>`;
+  return `<div class="lb-detail">${groups || '<p class="none">No picks.</p>'}</div>`;
 }
 
 function teamsView() {
   const st = standings();
   const L = lines();
   const locked = isLocked();
-  const ps = players();
-  let teams = TEAMS.filter(t => S.ui.conf === 'All' || t.conf === S.ui.conf).map(t => {
+  const ps = players().sort(byName);
+  const rows = TEAMS.filter(t => S.ui.conf === 'All' || t.conf === S.ui.conf).map(t => {
     const s = st.teams[t.code] || { w: 0, l: 0 };
-    return { ...t, pace: teamPace(L[t.code], s.w, s.l) };
+    const pace = teamPace(L[t.code], s.w, s.l);
+    const o = ps.filter(p => p.picks[t.code] === 'O'), u = ps.filter(p => p.picks[t.code] === 'U');
+    return { t, pace, o, u };
   });
-  const sorters = {
+  const cmp = {
     line: (a, b) => b.pace.line - a.pace.line,
-    delta: (a, b) => b.pace.delta - a.pace.delta,
-    name: (a, b) => a.name.localeCompare(b.name),
+    ahead: (a, b) => b.pace.delta - a.pace.delta || b.pace.line - a.pace.line,
+    behind: (a, b) => a.pace.delta - b.pace.delta || b.pace.line - a.pace.line,
+    split: (a, b) => Math.min(b.o.length, b.u.length) - Math.min(a.o.length, a.u.length) || b.pace.line - a.pace.line,
+    name: (a, b) => a.t.name.localeCompare(b.t.name),
   };
-  teams.sort(sorters[S.ui.sort] || sorters.line);
-  const filters = `<div class="filters" role="group" aria-label="Filter teams">
-    ${['All', 'East', 'West'].map(c => `<button class="pill" data-conf="${c}" aria-pressed="${S.ui.conf === c}">${c}</button>`).join('')}
-    <label class="sort">Sort <select data-sort>
-      ${[['line', 'Line'], ['delta', 'Vs pace'], ['name', 'Name']].map(([v, n]) => `<option value="${v}" ${S.ui.sort === v ? 'selected' : ''}>${n}</option>`).join('')}
-    </select></label></div>`;
-  const rows = teams.map(t => {
-    const p = t.pace, max = p.line * 1.25;
-    const pctW = Math.min(100, (p.wins / max) * 100);
-    const pctLine = 80;
-    const pctPace = Math.min(100, ((p.gp / GAMES_PER_TEAM) * p.line / max) * 100);
-    let note;
-    if (p.overClinched) note = `<span class="c c-won">✓ Over clinched</span>`;
-    else if (p.underClinched) note = `<span class="c c-lost">✕ Under clinched</span>`;
-    else if (p.gp === 0) note = `<span class="muted">No games yet</span>`;
-    else if (Math.abs(p.delta) < 1e-9) note = `– exactly on pace`;
-    else note = `${p.delta > 0 ? '▲' : '▼'} ${fmt1(Math.abs(p.delta))} wins ${p.delta > 0 ? 'ahead of' : 'behind'} pace`;
-    const proj = p.projected == null ? '' : ` · on pace for ${fmt1(p.projected)}`;
-    let who = '';
-    if (locked && ps.length) {
-      const side = side => ps.filter(x => x.picks[t.code] === side).map(x =>
-        `<span class="nm${S.me?.id === x.id ? ' me' : ''}">${esc(x.name)}</span>`).join(', ') || '<span class="muted">nobody</span>';
-      who = `<p class="who-picked"><span class="tag">O</span> ${side('O')} <span class="tag">U</span> ${side('U')}</p>`;
+  const sortOpts = [['line', 'Highest line'], ['ahead', 'Most ahead of pace'], ['behind', 'Most behind pace'], ...(locked ? [['split', 'Most divided picks']] : []), ['name', 'Team A–Z']];
+  if (!sortOpts.some(([v]) => v === S.ui.sort)) S.ui.sort = 'line';
+  rows.sort(cmp[S.ui.sort]);
+  const chip = (p, v, pace) => {
+    const s = pickStatus(pace, v);
+    return `<span class="chip s-${s}${S.me?.id === p.id ? ' me' : ''}" title="${esc(p.name)}: ${v === 'O' ? 'Over' : 'Under'} ${pace.line}, ${WORD[s]}"><i aria-hidden="true">${GLYPH[s]}</i><span>${esc(p.name)}</span><span class="sr-only"> ${WORD[s]}</span></span>`;
+  };
+  const html = rows.map(({ t, pace: p, o, u }) => {
+    const max = p.line * 1.25;
+    const fill = Math.min(100, (p.wins / max) * 100);
+    const mk = Math.min(100, ((p.gp / GAMES_PER_TEAM) * p.line / max) * 100);
+    let d;
+    if (p.gp === 0) d = '<small>No games played yet</small>';
+    else if (p.delta > 0.049) d = `<span>${glyph('ahead')} <b>${fmt1(p.delta)}</b> wins ahead of pace</span>`;
+    else if (p.delta < -0.049) d = `<span>${glyph('behind')} <b>${fmt1(-p.delta)}</b> wins behind pace</span>`;
+    else d = `<span>${glyph('even')} Right on pace</span>`;
+    if (p.projected != null) d += `<small>on pace for ${fmt1(p.projected)} wins</small>`;
+    if (p.overClinched) d += '<span class="tag">Over clinched</span>';
+    else if (p.underClinched) d += '<span class="tag">Under clinched</span>';
+    const aria = `${t.name}: ${p.wins} wins, pace marker ${fmt1(p.expected)}, line ${p.line}`;
+    let picksCol;
+    if (!ps.length) picksCol = '';
+    else if (!locked) {
+      const n = o.length + u.length;
+      picksCol = `<p class="none">${n} of ${ps.length} player${ps.length === 1 ? '' : 's'} picked · revealed at the lock</p>`;
+    } else {
+      picksCol = `<div class="grp"><span class="grp-l">Over</span>${o.map(x => chip(x, 'O', p)).join('') || '<span class="none">No one</span>'}</div>
+        <div class="grp"><span class="grp-l">Under</span>${u.map(x => chip(x, 'U', p)).join('') || '<span class="none">No one</span>'}</div>`;
     }
-    const tip = `${t.name}: ${p.wins}–${p.losses}. Line ${p.line}. Pace target now ${fmt1(p.expected)} wins.`;
-    return `<li class="team">
-      <div class="team-head"><span class="team-name">${esc(t.name)}</span>
-        <span class="team-meta">${t.conf} · <strong>${p.wins}–${p.losses}</strong> · ${p.gp} GP</span></div>
-      <div class="pace" role="img" aria-label="${esc(tip)}" title="${esc(tip)}">
-        <div class="pace-fill" style="width:${pctW}%"></div>
-        <div class="pace-line" style="left:${pctLine}%"><span>${p.line}</span></div>
-        ${p.gp ? `<div class="pace-marker" style="left:${pctPace}%"></div>` : ''}
-      </div>
-      <p class="team-note">${note}${proj}</p>${who}</li>`;
+    return `<article class="team">
+      <div><h3>${esc(t.name)}</h3><div class="t-meta">${t.conf} · <b>${p.wins}–${p.losses}</b> · ${p.gp} GP</div></div>
+      <div><div class="bar" role="img" aria-label="${esc(aria)}" title="${esc(aria)}"><span class="fill" style="width:${fill.toFixed(2)}%"></span><span class="ln" style="left:80%"></span>${p.gp ? `<span class="mk" style="left:${mk.toFixed(2)}%"></span>` : ''}</div>
+        <div class="cap"><span>${p.wins} wins${p.gp ? ` · pace marker ${fmt1(p.expected)}` : ''}</span><span>Line ${p.line}</span></div>
+        <div class="t-delta">${d}</div></div>
+      <div>${picksCol}</div>
+    </article>`;
   }).join('');
-  return `<section class="card"><h2>Team pace</h2>
-    <p class="muted small">Bar = wins so far (scale 0–125% of the line). Dashed tick = the line.
-    <span class="key-marker" aria-hidden="true"></span> Orange marker = where a team finishing exactly on its line would be now.</p>
-    ${filters}<ul class="teams">${rows}</ul></section>`;
+  return `<div class="sec-head"><h2>Team pace</h2>
+      <div class="controls">
+        <div class="seg-ctl" role="group" aria-label="Conference">${['All', 'East', 'West'].map(c => `<button type="button" data-conf="${c}" aria-pressed="${S.ui.conf === c}">${c}</button>`).join('')}</div>
+        <label class="sel">Sort <select data-sort>${sortOpts.map(([v, n]) => `<option value="${v}" ${S.ui.sort === v ? 'selected' : ''}>${n}</option>`).join('')}</select></label>
+      </div></div>
+    <div class="legend" aria-label="Bar key">
+      <span><i class="lg-fill"></i>Wins so far</span>
+      <span><i class="lg-mk"></i>Where the team should be by now if it finishes right on its line</span>
+      <span><i class="lg-ln"></i>The win total line</span>
+    </div>
+    <div class="teams">${html}</div>`;
 }
 
 function boardView() {
-  const err = S.dbError ? `<p class="banner err">Can't reach the database: ${esc(S.dbError)}</p>` : '';
-  return masthead() + err + cta() + leaderboardView() + teamsView();
+  return introView() + bannersView() + leaderboardView() + teamsView();
 }
 
-// --- join / sign in ---
+// ---------- join / sign in ----------
 function joinView() {
   if (S.shownCode) return codeShownView();
-  if (isLocked()) return `<section class="card"><h1>Picks are locked</h1><p>The season has started, so new players can't join. Ask the admin if you need to be added.</p><a class="btn" href="#/">Back to board</a></section>`;
-  return `<section class="card"><h1>Join the game</h1>
-    <form id="join-form" class="form">
-      <label for="name">Your name (what your friends will see)</label>
-      <input id="name" name="name" autocomplete="nickname" minlength="2" maxlength="24" required autofocus>
-      <p class="muted small">2–24 characters. Must be unique.</p>
+  if (isLocked()) return `<div class="card"><h3>Picks are locked</h3><p class="note">The season has started, so new players can't join. Ask the admin if you need to be added.</p><a class="btn ghost" href="#/">Back to the board</a></div>`;
+  return `<div class="sec-head"><h2>Join the game</h2></div>
+    <div class="card"><form id="join-form" class="form">
+      <label for="name">Your name in the game</label>
+      <input type="text" id="name" name="name" autocomplete="nickname" minlength="2" maxlength="24" required autofocus>
+      <p class="note">2–24 characters, and nobody else can have it. Your friends will see it.</p>
       <button class="btn primary" type="submit">Join</button>
       <p class="form-err" role="alert"></p>
-    </form>
-    <p class="muted small">Already joined on another device? <a href="#/signin">Sign in with your edit code</a>.</p></section>`;
+    </form></div>
+    <p class="note">Already joined on another phone? <a href="#/signin">Sign in with your edit code</a>.</p>`;
 }
 function codeShownView() {
   const { code, title, next } = S.shownCode;
-  return `<section class="card"><h1>${esc(title)}</h1>
-    <p>Your edit code:</p>
+  return `<div class="sec-head"><h2>${esc(title)}</h2></div>
+    <div class="card"><p>Your edit code:</p>
     <p class="code">${esc(code)}</p>
-    <button class="btn" data-copy="${esc(code)}">Copy code</button>
-    <p class="warn">Save this somewhere (a note, or message it to yourself). You need it to edit your picks from another device. It won't be shown again.</p>
-    <a class="btn primary" href="${next}" data-done-code>I saved it, continue</a></section>`;
+    <button class="btn ghost" data-copy="${esc(code)}">Copy code</button>
+    <p class="warnbox">Save this somewhere (a note, or message it to yourself). You need it to edit your picks from another device. It won't be shown again.</p>
+    <a class="btn primary" href="${next}" data-done-code>I saved it, continue</a></div>`;
 }
 function signinView() {
-  return `<section class="card"><h1>Sign in</h1>
-    <form id="signin-form" class="form">
-      <label for="sname">Name</label><input id="sname" name="name" required>
-      <label for="scode">Edit code</label><input id="scode" name="code" required autocomplete="off" autocapitalize="characters" spellcheck="false">
+  return `<div class="sec-head"><h2>Sign in</h2></div>
+    <div class="card"><form id="signin-form" class="form">
+      <label for="sname">Name</label><input type="text" id="sname" name="name" required>
+      <label for="scode">Edit code</label><input type="text" id="scode" name="code" required autocomplete="off" autocapitalize="characters" spellcheck="false">
       <button class="btn primary" type="submit">Sign in</button>
       <p class="form-err" role="alert"></p>
-    </form>
-    <p class="muted small">Lost your code? Ask the admin to reset it.</p></section>`;
+    </form></div>
+    <p class="note">Lost your code? Ask the admin to reset it.</p>`;
 }
 
-// --- pick sheet ---
+// ---------- pick sheet ----------
 function picksView(pid) {
-  const asAdmin = pid && pid !== S.me?.id;
+  const asAdmin = !!pid && pid !== S.me?.id;
   pid = pid || S.me?.id;
   if (!pid || !S.db.players?.[pid]) {
-    return `<section class="card"><h1>My picks</h1><p>You're not signed in on this device.</p>
-      <a class="btn primary" href="#/join">Join the game</a> <a class="btn ghost" href="#/signin">Sign in with code</a></section>`;
+    return `<div class="sec-head"><h2>My picks</h2></div>
+      <div class="pk-list"><div class="empty"><b>${isLocked() ? 'Picks are locked' : "You're not signed in on this device"}</b>
+      ${isLocked() ? 'Sign in to see your picks.' : 'Join the game to start picking, or sign in with your edit code.'}
+      <div class="row-form" style="justify-content:center;margin-top:14px">${isLocked() ? '' : '<a class="btn primary" href="#/join">Join the game</a>'}<a class="btn ghost" href="#/signin">Sign in with code</a></div></div></div>`;
   }
-  if (asAdmin && !S.adminCode) return `<section class="card"><p>Admin sign-in needed.</p><a class="btn" href="#/admin">Admin</a></section>`;
+  if (asAdmin && !S.adminCode) return `<div class="card"><p>Admin sign-in needed.</p><a class="btn" href="#/admin">Admin</a></div>`;
   const locked = isLocked();
   const canEdit = asAdmin || !locked;
   const picks = picksFor(pid);
   const L = lines();
   const n = Object.keys(picks).length;
   const sorted = [...TEAMS].sort((a, b) => L[b.code] - L[a.code] || a.name.localeCompare(b.name));
-  const save = S.saveState === 'saving' ? 'Saving…' : S.saveState === 'saved' ? 'Saved ✓' : S.saveState ? `⚠ ${esc(S.saveState)}` : '';
+  const save = S.saveState === 'saving' ? 'Saving…' : S.saveState === 'saved' ? 'Saved ✓' : S.saveState ? `⚠ ${esc(S.saveState)}` : (locked && !asAdmin ? 'Picks are locked' : 'Picks are open');
   const rows = sorted.map(t => {
     const v = picks[t.code];
-    return `<li class="pick-row">
-      <span class="pr-team"><span class="pr-name">${esc(t.name)}</span><span class="muted small">${t.conf}</span></span>
-      <span class="pr-line">${L[t.code]}</span>
-      <span class="pr-btns">
-        <button class="ou o" data-pick="${t.code}" data-v="O" aria-pressed="${v === 'O'}" ${canEdit ? '' : 'disabled'} aria-label="${esc(t.name)} over ${L[t.code]}">Over</button>
-        <button class="ou u" data-pick="${t.code}" data-v="U" aria-pressed="${v === 'U'}" ${canEdit ? '' : 'disabled'} aria-label="${esc(t.name)} under ${L[t.code]}">Under</button>
-      </span></li>`;
+    return `<div class="pk"><div class="pk-n"><b>${esc(t.name)}</b><small>${t.conf} · win total ${L[t.code]}</small></div>
+      <div class="tg" role="group" aria-label="${esc(t.name)} pick">
+        <button type="button" data-pick="${t.code}" data-v="O" aria-pressed="${v === 'O'}" ${canEdit ? '' : 'disabled'}>Over</button>
+        <button type="button" data-pick="${t.code}" data-v="U" aria-pressed="${v === 'U'}" ${canEdit ? '' : 'disabled'}>Under</button>
+      </div></div>`;
   }).join('');
-  return `<section class="card picks" data-pid="${pid}">
-    <h1>${asAdmin ? `Editing ${esc(S.db.players[pid].name)} (admin)` : 'My picks'}</h1>
-    ${locked && !asAdmin ? `<p class="banner">🔒 Picks are locked. Good luck!</p>` :
-      `<p class="muted small">Tap Over or Under for each team. Tap again to clear. Saves automatically. Lock: ${fmtDate(lockAt(), 'America/New_York')}.</p>`}
-    <div class="picks-bar"><strong>${n} of 30 picked</strong><span class="save" role="status">${save}</span></div>
-    <ul class="pick-list">${rows}</ul>
-    ${asAdmin ? '<a class="btn" href="#/admin">Back to admin</a>' : `<p class="muted small">Playing as ${esc(S.db.players[pid].name)} · <button class="link" data-signout>Sign out on this device</button></p>`}
-  </section>`;
+  return `<div class="sec-head"><h2>${asAdmin ? `Editing ${esc(S.db.players[pid].name)}` : 'My picks'}</h2>
+      <p class="hint">${locked && !asAdmin ? 'Locked in for the season. Good luck!' : `Pick Over or Under for every team. Tap a selected pick again to clear it. Saves automatically. Locks ${lockText()}.`}</p></div>
+    <div data-pid="${pid}">
+      <div class="pk-head"><span><b>${esc(S.db.players[pid].name)}</b> · ${n} of 30 picked</span><span role="status">${save}</span></div>
+      <div class="pk-list">${rows}</div>
+    </div>
+    <p class="note" style="margin-top:14px">${asAdmin ? '<a href="#/admin">Back to admin</a>' : `Playing as ${esc(S.db.players[pid].name)} · <button class="link" data-signout>Sign out on this device</button>`}</p>`;
 }
 
 let saveTimer = null;
 function queuePick(pid, team, v) {
-  const current = picksFor(pid)[team];
-  const next = current === v ? null : v;
+  const next = picksFor(pid)[team] === v ? null : v;
   S.pending[pid] = { ...(S.pending[pid] || {}), [team]: next };
   S.saveState = 'saving';
   render();
@@ -338,108 +362,109 @@ async function flush(pid) {
   render();
 }
 
-// --- how it works ---
+// ---------- full rules ----------
 function rulesView() {
-  return `<section class="card prose"><h1>How it works</h1>
-    <p>Each NBA team has a win-total line (always ending in .5, so no pushes). Pick <b>Over</b> or <b>Under</b> for all 30 teams before the first tip-off. Picks lock ${fmtDate(lockAt(), 'America/New_York')}.</p>
-    <h2>Scoring during the season</h2>
-    <ul>
-      <li><b>✓ Locked in</b>: your side is clinched (team already passed the line, or can't reach it).</li>
-      <li><b>▲ On pace</b>: the team is running ahead of the pace your pick needs.</li>
-      <li><b>– Even</b>: exactly on pace (or no games yet).</li>
-      <li><b>▼ Behind</b>: pace is going the other way, but it's not over.</li>
-      <li><b>✕ Out of reach</b>: the other side is clinched.</li>
+  return `<div class="sec-head"><h2>How it works</h2></div>
+  <div class="card prose">
+    <p>Each NBA team has a win-total line. Lines always end in .5, so there are no ties. Pick <b>Over</b> or <b>Under</b> for all 30 teams before the first tip-off. Picks lock <b>${lockText()}</b>, and the database enforces it.</p>
+    <h3>Scoring during the season</h3>
+    <ul class="key" style="flex-direction:column;align-items:flex-start;gap:8px;margin:8px 0">
+      <li>${glyph('won')}<span><b>Locked in</b>: your side is clinched (the team already passed the line, or can't reach it).</span></li>
+      <li>${glyph('ahead')}<span><b>On pace</b>: the team is running at the pace your pick needs.</span></li>
+      <li>${glyph('even')}<span><b>Even</b>: exactly on pace, or no games yet.</span></li>
+      <li>${glyph('behind')}<span><b>Behind pace</b>: the pace favours the other side, but it's not over.</span></li>
+      <li>${glyph('lost')}<span><b>Out of reach</b>: the other side is clinched.</span></li>
     </ul>
-    <p>"Pace" compares wins so far to <i>line × games played ÷ 82</i>. Your score is <b>locked in + on pace</b>. After all 82 games every pick is either locked in or out of reach, and your final score is how many you got right.</p>
-    <p>Ties: more locked-in picks ranks higher; players tied on both share a rank.</p>
-    <h2>Your edit code</h2>
-    <p>No accounts. When you join you get a random edit code. This device remembers it. Save it to edit from another device. Lost it? Ask the admin to reset it.</p>
-  </section>`;
+    <p>"Pace" compares wins so far with <i>line × games played ÷ 82</i>, which is where a team finishing exactly on its line would be right now. Your score is <b>locked in + on pace</b>. After all 82 games every pick is either locked in or out of reach, so your final score is simply how many you got right.</p>
+    <p>Ties: more locked-in picks ranks higher. Players tied on both share a rank.</p>
+    <h3>Your edit code</h3>
+    <p>There are no accounts. When you join, you get a random edit code, and this device remembers it. Save it to edit your picks from another device. Lost it? Ask the admin to reset it.</p>
+  </div>`;
 }
 
-// --- admin ---
+// ---------- admin ----------
 function adminView() {
   if (S.shownCode) return codeShownView();
   if (!S.adminCode) {
-    return `<section class="card"><h1>Admin</h1>
-      <form id="admin-form" class="form">
+    return `<div class="sec-head"><h2>Admin</h2></div>
+      <div class="card"><form id="admin-form" class="form">
         <label for="acode">Admin code</label>
-        <input id="acode" name="code" required autocomplete="off" autocapitalize="characters" spellcheck="false">
+        <input type="text" id="acode" name="code" required autocomplete="off" autocapitalize="characters" spellcheck="false">
         <button class="btn primary" type="submit">Sign in as admin</button>
         <p class="form-err" role="alert"></p>
-      </form>
-      <details class="setup"><summary>First-time setup</summary>
-        <p class="small">The first person to press this becomes the admin for good. Do it once, right after the site goes live, before sharing the link.</p>
-        <button class="btn" data-claim>Claim admin</button>
-      </details></section>`;
+      </form></div>
+      <details class="card"><summary><b>First-time setup</b></summary>
+        <p class="note">The first person to press this becomes the admin for good. It's already been done for this game.</p>
+        <button class="btn ghost" data-claim style="margin-top:10px">Claim admin</button>
+      </details>`;
   }
   const L = lines();
   const st = standings();
   const lock = new Date(lockAt());
   const localIso = new Date(lock.getTime() - lock.getTimezoneOffset() * 6e4).toISOString().slice(0, 16);
-  const ps = players().sort((a, b) => a.name.localeCompare(b.name));
-  return `<section class="card"><h1>Admin</h1>
-    <p class="small">Signed in as admin on this device. <button class="link" data-admin-signout>Sign out</button></p></section>
+  const ps = players().sort(byName);
+  const teamsAZ = [...TEAMS].sort((a, b) => a.name.localeCompare(b.name));
+  return `<div class="sec-head"><h2>Admin</h2><p class="hint">Signed in as admin on this device. <button class="link" data-admin-signout>Sign out</button></p></div>
 
-    <section class="card"><h2>Win total lines</h2>
-      <p class="small warn">Seeded from Fanatics (Oct 15), not FanDuel. Check each against FanDuel and fix here before the lock. Every line must end in .5.</p>
-      <form id="lines-form" class="grid-form">
-        ${[...TEAMS].sort((a, b) => a.code.localeCompare(b.code)).map(t => `<label><span>${t.code}</span>
-          <input name="${t.code}" type="number" inputmode="decimal" step="1" min="0.5" max="81.5" value="${L[t.code]}" required></label>`).join('')}
-        <button class="btn primary" type="submit">Save lines</button><p class="form-err" role="alert"></p>
-      </form></section>
+    <div class="card"><h3>Win total lines</h3>
+      <p class="warnbox">Seeded from Fanatics (Oct 15), not FanDuel. Check each against FanDuel and fix it here before the lock. Every line must end in .5.</p>
+      <form id="lines-form">
+        <div class="adm-grid">${teamsAZ.map(t => `<label><span>${esc(t.name)}</span><input name="${t.code}" type="number" inputmode="decimal" step="1" min="0.5" max="81.5" value="${L[t.code]}" required aria-label="${esc(t.name)} line"></label>`).join('')}</div>
+        <button class="btn" type="submit">Save lines</button><p class="form-err" role="alert"></p>
+      </form></div>
 
-    <section class="card"><h2>Lock time</h2>
-      <p class="small">Currently ${fmtDate(lockAt(), 'America/New_York')} (${fmtDate(lockAt())} your time). First tip: Celtics at Pistons, Tue Oct 20, 3:00 PM ET. Enforced by the database.</p>
-      <form id="lock-form" class="form inline"><input type="datetime-local" name="at" value="${localIso}" required>
-        <button class="btn" type="submit">Save lock time</button><p class="form-err" role="alert"></p></form></section>
+    <div class="card"><h3>Lock time</h3>
+      <p class="note">Currently ${lockText()} (${fmtDate(lockAt())} your time). First tip: Celtics at Pistons, Tue Oct 20, 3:00 PM ET. The database enforces this.</p>
+      <form id="lock-form" class="row-form" style="margin-top:10px"><input type="datetime-local" name="at" value="${localIso}" required aria-label="Lock time">
+        <button class="btn ghost" type="submit">Save lock time</button></form><p class="form-err" role="alert"></p></div>
 
-    <section class="card"><h2>Standings by hand</h2>
-      <p class="small">Use only if the automatic weekly update breaks. Whichever is newer wins: your manual entry, or the next automatic update.
+    <div class="card"><h3>Players (${ps.length})</h3>
+      <ul class="plist">${ps.map(p => `<li data-pid="${p.id}" data-name="${esc(p.name)}">
+        <span><b>${esc(p.name)}</b> · ${Object.keys(p.picks).length} of 30 picked</span>
+        <span class="acts">
+          <a class="btn sm ghost" href="#/picks/${p.id}">Edit picks</a>
+          <button class="btn sm ghost" data-reset>Reset code</button>
+          <button class="btn sm ghost" data-rename>Rename</button>
+          <button class="btn sm ${S.confirmDelete === p.id ? 'warn' : 'ghost'}" data-delete>${S.confirmDelete === p.id ? 'Confirm delete' : 'Delete'}</button>
+        </span></li>`).join('') || '<li><span class="none">No players yet.</span></li>'}</ul></div>
+
+    <div class="card"><h3>Standings by hand</h3>
+      <p class="note">Use this only if the automatic weekly update breaks. Whichever is newer wins: your entry, or the next automatic update.
       Current source: ${esc(SOURCE_NAMES[st.source] || st.source || 'none')}${st.at ? ', ' + fmtDate(st.at) : ''}.</p>
-      <form id="standings-form" class="grid-form standings">
-        ${[...TEAMS].sort((a, b) => a.code.localeCompare(b.code)).map(t => {
+      <form id="standings-form">
+        <div class="adm-grid">${teamsAZ.map(t => {
           const s = st.teams[t.code] || { w: 0, l: 0 };
-          return `<label><span>${t.code}</span><input name="${t.code}-w" type="number" min="0" max="82" value="${s.w}" aria-label="${t.code} wins">
-            <input name="${t.code}-l" type="number" min="0" max="82" value="${s.l}" aria-label="${t.code} losses"></label>`;
-        }).join('')}
-        <button class="btn primary" type="submit">Save standings</button>
-        ${S.db.manualStandings ? '<button class="btn ghost" type="button" data-clear-manual>Remove manual standings</button>' : ''}
+          return `<label><span>${esc(t.name)}</span><span class="wl"><input name="${t.code}-w" type="number" min="0" max="82" value="${s.w}" aria-label="${esc(t.name)} wins"><input name="${t.code}-l" type="number" min="0" max="82" value="${s.l}" aria-label="${esc(t.name)} losses"></span></label>`;
+        }).join('')}</div>
+        <div class="row-form"><button class="btn ghost" type="submit">Save standings by hand</button>
+        ${S.db.manualStandings ? '<button class="btn ghost" type="button" data-clear-manual>Remove hand-entered standings</button>' : ''}</div>
         <p class="form-err" role="alert"></p>
-      </form></section>
-
-    <section class="card"><h2>Players (${ps.length})</h2>
-      <ul class="admin-players">${ps.map(p => `<li data-pid="${p.id}" data-name="${esc(p.name)}">
-        <strong>${esc(p.name)}</strong> <span class="muted small">${Object.keys(picksFor(p.id)).length}/30</span>
-        <span class="admin-actions">
-          <a class="btn sm" href="#/picks/${p.id}">Edit picks</a>
-          <button class="btn sm" data-reset>Reset code</button>
-          <button class="btn sm" data-rename>Rename</button>
-          <button class="btn sm danger" data-delete>Delete</button>
-        </span></li>`).join('') || '<li class="muted">No players yet.</li>'}</ul></section>`;
+      </form></div>`;
 }
 
 // ---------- router / render ----------
 function route() {
-  const h = location.hash.replace(/^#\/?/, '');
-  const [page, arg] = h.split('/');
+  const [page, arg] = location.hash.replace(/^#\/?/, '').split('/');
   return { page: page || 'board', arg };
 }
+const TAB_OF = { board: 'board', picks: 'picks', join: 'picks', signin: 'picks', rules: 'rules', admin: 'admin' };
 function render({ live = false } = {}) {
   // Background updates (database, standings file, timers) must not wipe a form the user is typing in.
   const a = document.activeElement;
-  if (live && a && $app.contains(a) && (a.tagName === 'INPUT' || a.tagName === 'SELECT')) return;
-  if (!S.dbReady && !S.dbError) { $app.innerHTML = '<p class="loading">Loading…</p>'; return; }
+  if (live && a && $app.contains(a) && (a.tagName === 'INPUT' || a.tagName === 'SELECT')) { renderMast(); return; }
+  renderMast();
   const { page, arg } = route();
+  document.querySelectorAll('.tab').forEach(t => t.toggleAttribute('aria-current', t.dataset.tab === (TAB_OF[page] || 'board')));
+  document.querySelectorAll('.tab[aria-current]').forEach(t => t.setAttribute('aria-current', 'page'));
+  if (!S.dbReady && !S.dbError) { $app.innerHTML = '<p class="loading">Loading…</p>'; return; }
   const view = { board: boardView, join: joinView, signin: signinView, picks: () => picksView(arg), rules: rulesView, admin: adminView }[page] || boardView;
   const y = window.scrollY;
-  // Preserve open <details> across live re-renders.
-  const open = [...$app.querySelectorAll('details[open]')].map(d => d.closest('[data-pid],li')?.querySelector('.lb-name')?.textContent).filter(Boolean);
+  const open = [...$app.querySelectorAll('details[open][data-pid]')].map(d => d.dataset.pid);
   $app.innerHTML = view();
-  $app.querySelectorAll('.lb-row').forEach(li => { if (open.includes(li.querySelector('.lb-name')?.textContent)) li.querySelector('details').open = true; });
+  open.forEach(id => { const d = $app.querySelector(`details[data-pid="${id}"]`); if (d) d.open = true; });
   window.scrollTo(0, y);
 }
-addEventListener('hashchange', () => { S.saveState = ''; render(); window.scrollTo(0, 0); });
+addEventListener('hashchange', () => { S.saveState = ''; S.confirmDelete = null; render(); window.scrollTo(0, 0); });
 
 // ---------- events ----------
 $app.addEventListener('click', async e => {
@@ -463,14 +488,13 @@ $app.addEventListener('click', async e => {
     try {
       const code = await api.claimAdmin();
       S.adminCode = code; store.set('swou:admin', code);
-      // Save the seed lines into the database so they're visible and editable.
-      await api.setLines(code, DEFAULT_LINES);
+      await api.setLines(code, DEFAULT_LINES); // seed lines so they're visible and editable
       S.shownCode = { code, title: "You're the admin", next: '#/admin' };
       render();
     } catch (err) { toast(err instanceof UserError ? err.message : 'Failed: ' + err.message); }
   } else if ('clearManual' in b.dataset) {
-    await adminDo(() => api.clearManualStandings(S.adminCode), 'Manual standings removed');
-  } else if (b.closest('.admin-players li')) {
+    await adminDo(() => api.clearManualStandings(S.adminCode), 'Hand-entered standings removed');
+  } else if (b.closest('.plist li[data-pid]')) {
     const li = b.closest('li'); const pid = li.dataset.pid; const name = li.dataset.name;
     if ('reset' in b.dataset) {
       if (!confirm(`Give ${name} a new edit code? Their old code stops working.`)) return;
@@ -482,19 +506,21 @@ $app.addEventListener('click', async e => {
       const nn = prompt(`New name for ${name}:`, name);
       if (nn && nn !== name) await adminDo(() => api.renamePlayer(S.adminCode, pid, name, nn), 'Renamed');
     } else if ('delete' in b.dataset) {
-      if (confirm(`Delete ${name} and all their picks? This can't be undone.`)) await adminDo(() => api.deletePlayer(S.adminCode, pid, name), 'Deleted');
+      if (S.confirmDelete !== pid) { S.confirmDelete = pid; render(); return; }
+      S.confirmDelete = null;
+      await adminDo(() => api.deletePlayer(S.adminCode, pid, name), `${name} deleted`);
     }
   }
 });
 $app.addEventListener('change', e => {
-  if (e.target.matches('[data-sort]')) { S.ui.sort = e.target.value; store.set('swou:ui', S.ui); render(); }
+  if (e.target.matches('[data-sort]')) { S.ui.sort = e.target.value; store.set('swou:ui', S.ui); e.target.blur(); render(); }
 });
 
 async function adminDo(fn, okMsg) {
   try { await fn(); if (okMsg) toast(okMsg); }
   catch (err) {
-    const msg = err instanceof UserError ? err.message : /permission/i.test(err.message) ? 'Denied. Is your admin code right? Values valid?' : err.message;
-    toast(msg); return false;
+    toast(err instanceof UserError ? err.message : /permission/i.test(err.message) ? 'Denied. Is your admin code right? Are the values valid?' : err.message);
+    return false;
   }
   render(); return true;
 }
@@ -502,7 +528,7 @@ async function adminDo(fn, okMsg) {
 $app.addEventListener('submit', async e => {
   e.preventDefault();
   const f = e.target;
-  const errEl = f.querySelector('.form-err');
+  const errEl = f.querySelector('.form-err') || f.parentElement.querySelector('.form-err');
   const fail = m => { if (errEl) errEl.textContent = m; };
   const btn = f.querySelector('[type=submit]');
   const data = Object.fromEntries(new FormData(f));
@@ -529,11 +555,11 @@ $app.addEventListener('submit', async e => {
       const out = {};
       for (const t of TEAMS) {
         const v = Number(data[t.code]);
-        if (!(v > 0 && v < 82 && v % 1 === 0.5)) return fail(`${t.code}: line must end in .5 (got ${data[t.code]})`);
+        if (!(v > 0 && v < 82 && v % 1 === 0.5)) return fail(`${t.name}: the line must end in .5 (got ${data[t.code]})`);
         out[t.code] = v;
       }
       document.activeElement.blur();
-      if (await adminDo(() => api.setLines(S.adminCode, out), 'Lines saved')) fail('');
+      await adminDo(() => api.setLines(S.adminCode, out), 'Lines saved');
     } else if (f.id === 'lock-form') {
       const ms = new Date(data.at).getTime();
       if (!Number.isFinite(ms)) return fail('Invalid date');
@@ -543,7 +569,7 @@ $app.addEventListener('submit', async e => {
       const teams = {};
       for (const t of TEAMS) {
         const w = Number(data[`${t.code}-w`]), l = Number(data[`${t.code}-l`]);
-        if (!Number.isInteger(w) || !Number.isInteger(l) || w < 0 || l < 0 || w + l > 82) return fail(`${t.code}: bad record ${w}-${l}`);
+        if (!Number.isInteger(w) || !Number.isInteger(l) || w < 0 || l < 0 || w + l > 82) return fail(`${t.name}: bad record ${w}–${l}`);
         teams[t.code] = { w, l };
       }
       const W = Object.values(teams).reduce((s, x) => s + x.w, 0), Lo = Object.values(teams).reduce((s, x) => s + x.l, 0);
@@ -565,7 +591,8 @@ async function loadFile() {
     if (r.ok) { S.file = await r.json(); render({ live: true }); }
   } catch { /* offline; keep last */ }
 }
+render();
 loadFile();
 setInterval(loadFile, 30 * 60e3);
-setInterval(() => { if (route().page === 'board') render({ live: true }); }, 60e3); // countdown + lock flip
+setInterval(() => render({ live: true }), 60e3); // countdown + lock flip
 document.addEventListener('visibilitychange', () => { if (!document.hidden) loadFile(); });
