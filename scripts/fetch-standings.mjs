@@ -8,7 +8,7 @@
 //   2. NBA.com CDN full-season schedule; W–L computed from final scores of regular-season games
 // Any unmapped team name, missing team, or wrong season fails the run loudly.
 import { writeFileSync, readFileSync } from 'node:fs';
-import { TEAMS, teamCode } from '../js/teams.js';
+import { TEAMS, teamCode, DEFAULT_LOCK_AT } from '../js/teams.js';
 
 export const SEASON_END_YEAR = 2027;        // 2026–27
 export const SEASON_LABEL = '2026-27';
@@ -29,7 +29,7 @@ function codeFrom(...names) {
   return [...codes][0];
 }
 
-export function validate(teams) {
+export function validate(teams, now = Date.now()) {
   const codes = Object.keys(teams).sort();
   const want = TEAMS.map(t => t.code).sort();
   const missing = want.filter(c => !codes.includes(c));
@@ -40,11 +40,13 @@ export function validate(teams) {
   const wins = Object.values(teams).reduce((s, t) => s + t.w, 0);
   const losses = Object.values(teams).reduce((s, t) => s + t.l, 0);
   if (wins !== losses) throw new Error(`League wins (${wins}) ≠ losses (${losses}); feed looks inconsistent`);
+  // Opening night is after the default lock; any games before then means last season's table.
+  if (now < DEFAULT_LOCK_AT && wins > 0) throw new Error(`${wins} games already played before opening night: feed is probably last season`);
   return teams;
 }
 
 /** ESPN: find every {team, stats[]} entry anywhere in the response. */
-export function parseEspn(json) {
+export function parseEspn(json, now = Date.now()) {
   const seasons = new Set();
   const teams = {};
   (function walk(node) {
@@ -66,11 +68,11 @@ export function parseEspn(json) {
     Object.values(node).forEach(walk);
   })(json);
   if (seasons.size && !seasons.has(SEASON_END_YEAR)) throw new Error(`ESPN returned season ${[...seasons]}, expected ${SEASON_END_YEAR}`);
-  return validate(teams);
+  return validate(teams, now);
 }
 
 /** NBA.com schedule: count wins/losses from finished regular-season games (gameId 002…). */
-export function parseNbaSchedule(json) {
+export function parseNbaSchedule(json, now = Date.now()) {
   const ls = json?.leagueSchedule;
   if (!ls) throw new Error('NBA: no leagueSchedule');
   if (ls.seasonYear !== SEASON_LABEL) throw new Error(`NBA schedule is for ${ls.seasonYear}, expected ${SEASON_LABEL}`);
@@ -87,7 +89,7 @@ export function parseNbaSchedule(json) {
       teams[win].w++; teams[lose].l++;
     }
   }
-  return validate(teams);
+  return validate(teams, now);
 }
 
 async function getJson(url) {

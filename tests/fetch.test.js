@@ -3,7 +3,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { TEAMS } from '../js/teams.js';
-import { parseEspn, parseNbaSchedule } from '../scripts/fetch-standings.mjs';
+
+const MIDSEASON = Date.UTC(2027, 0, 15);
+import { parseEspn, parseNbaSchedule, validate } from '../scripts/fetch-standings.mjs';
 
 const ESPN_NAMES = {
   GSW: ['Golden State Warriors', 'GS'], NYK: ['New York Knicks', 'NY'], NOP: ['New Orleans Pelicans', 'NO'],
@@ -21,25 +23,25 @@ function espnFixture(season = 2027) {
 }
 
 test('ESPN shape parses, odd abbreviations map', () => {
-  const s = parseEspn(espnFixture());
+  const s = parseEspn(espnFixture(), MIDSEASON);
   assert.equal(Object.keys(s).length, 30);
   assert.ok(s.GSW && s.LAC && s.LAL && s.UTA && s.WAS);
 });
 
 test('ESPN wrong season is rejected (e.g. last year\'s final table in preseason)', () => {
-  assert.throws(() => parseEspn(espnFixture(2026)), /expected 2027/);
+  assert.throws(() => parseEspn(espnFixture(2026), MIDSEASON), /expected 2027/);
 });
 
 test('ESPN unmapped team fails loudly', () => {
   const f = espnFixture();
   f.children[0].standings.entries[0].team = { displayName: 'Seattle SuperSonics', abbreviation: 'SEA' };
-  assert.throws(() => parseEspn(f), /Unmapped/);
+  assert.throws(() => parseEspn(f, MIDSEASON), /Unmapped/);
 });
 
 test('ESPN missing team fails loudly', () => {
   const f = espnFixture();
   f.children[1].standings.entries.pop();
-  assert.throws(() => parseEspn(f), /Missing teams|≠/);
+  assert.throws(() => parseEspn(f, MIDSEASON), /Missing teams|≠/);
 });
 
 test('NBA schedule: counts only finished regular-season games', () => {
@@ -54,7 +56,7 @@ test('NBA schedule: counts only finished regular-season games', () => {
     { games: [g('0022600003', 1, 'SAS', 0, 'OKC', 0)] },      // not started
     { games: [g('0062600001', 3, 'LAL', 120, 'MIL', 100)] },  // Cup final, ignored
   ] } };
-  const s = parseNbaSchedule(json);
+  const s = parseNbaSchedule(json, MIDSEASON);
   assert.deepEqual(s.DET, { w: 1, l: 0 });
   assert.deepEqual(s.BOS, { w: 0, l: 1 });
   assert.deepEqual(s.PHI, { w: 1, l: 0 });
@@ -63,4 +65,12 @@ test('NBA schedule: counts only finished regular-season games', () => {
 
 test('NBA schedule: wrong season rejected', () => {
   assert.throws(() => parseNbaSchedule({ leagueSchedule: { seasonYear: '2025-26', gameDates: [] } }), /expected 2026-27/);
+});
+
+test('records before opening night are rejected as last season', () => {
+  const teams = Object.fromEntries(TEAMS.map(t => [t.code, { w: 41, l: 41 }]));
+  assert.throws(() => validate(teams, Date.UTC(2026, 9, 16)), /last season/);
+  assert.ok(validate(teams, Date.UTC(2027, 3, 20)));
+  const zero = Object.fromEntries(TEAMS.map(t => [t.code, { w: 0, l: 0 }]));
+  assert.ok(validate(zero, Date.UTC(2026, 9, 16)));
 });
