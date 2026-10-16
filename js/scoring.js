@@ -30,9 +30,21 @@ export function pickStatus(pace, pick) {
 
 export const STATUSES = ['won', 'ahead', 'even', 'behind', 'lost'];
 
+export const LOCKS_PER_PLAYER = 3;
+
+/** Points for one pick. Normal: +1 right, 0 wrong. Lock: +2 right, -1 wrong. In-progress picks count at pace. */
+export function pickPoints(status, isLock) {
+  if (status === 'won' || status === 'ahead') return isLock ? 2 : 1;
+  if (status === 'lost' || status === 'behind') return isLock ? -1 : 0;
+  return 0; // even
+}
+const CLINCHED = new Set(['won', 'lost']);
+
 /**
- * lines: {CODE: number}; standings: {CODE: {w, l}}; players: [{id, name, picks: {CODE: 'O'|'U'}}]
- * Returns sorted rows with dense rank by (onTrack, won).
+ * lines: {CODE: number}; standings: {CODE: {w, l}};
+ * players: [{id, name, picks: {CODE: 'O'|'U'}, locks: [CODE, ...]}]
+ * Sort: points desc, then clinched points desc, then fewer out-of-reach, then name.
+ * Players tied on (points, clinched points) share a rank.
  */
 export function leaderboard(lines, standings, players) {
   const paces = {};
@@ -43,23 +55,31 @@ export function leaderboard(lines, standings, players) {
   const rows = players.map(p => {
     const counts = { won: 0, ahead: 0, even: 0, behind: 0, lost: 0, unpicked: 0 };
     const statuses = {};
+    const lockSet = new Set(p.locks || []);
+    const locks = [];
+    let points = 0, clinchedPoints = 0;
     for (const code of Object.keys(paces)) {
       const pick = p.picks?.[code];
       if (pick !== 'O' && pick !== 'U') { counts.unpicked++; continue; }
       const st = pickStatus(paces[code], pick);
+      const isLock = lockSet.has(code);
+      if (isLock) locks.push(code);
+      const pts = pickPoints(st, isLock);
       statuses[code] = st;
       counts[st]++;
+      points += pts;
+      if (CLINCHED.has(st)) clinchedPoints += pts;
     }
-    return { id: p.id, name: p.name, counts, statuses, onTrack: counts.won + counts.ahead };
+    return { id: p.id, name: p.name, counts, statuses, locks, points, clinchedPoints, onTrack: counts.won + counts.ahead };
   });
   rows.sort((a, b) =>
-    b.onTrack - a.onTrack ||
-    b.counts.won - a.counts.won ||
+    b.points - a.points ||
+    b.clinchedPoints - a.clinchedPoints ||
     a.counts.lost - b.counts.lost ||
     a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
   let rank = 0, prevKey = null;
   for (const r of rows) {
-    const key = `${r.onTrack}|${r.counts.won}`;
+    const key = `${r.points}|${r.clinchedPoints}`;
     if (key !== prevKey) { rank++; prevKey = key; }
     r.rank = rank;
   }

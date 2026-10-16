@@ -74,8 +74,10 @@ Pure functions in [`js/scoring.js`](js/scoring.js), tested in [`tests/scoring.te
 - delta = W − expected
 - projected = W / GP × 82
 - **Over clinched** when W > line; **Under clinched** when W + remaining < line.
-- Pick status: **✓ locked in** / **✕ out of reach** once clinched; otherwise **▲ on pace** / **▼ behind** depending on the sign of delta; **– even** when delta = 0.
-- Score = locked in + on pace. Sort by that, then by locked in, then fewest out of reach, then name. Players tied on (score, locked in) share a rank.
+- Pick status: **✓ clinched** / **✕ out of reach** once decided; otherwise **▲ on pace** / **▼ behind** depending on the sign of delta; **– even** when delta = 0.
+- **Locks:** every player marks exactly 3 picks as 🔒 locks (stored as slots `locks/<player>/a|b|c`; the rules allow only real, picked, distinct teams, and freeze them at the lock time like picks).
+- **Points:** normal pick +1 if clinched or on pace, otherwise 0. Lock +2 if clinched or on pace, −1 if out of reach or behind, 0 if even.
+- Sort by points, then points from clinched picks, then fewest out of reach, then name. Players tied on (points, clinched points) share a rank. After 82 games every pick is clinched or out of reach, so points become final.
 - Season progress = (sum of GP) ÷ 2 out of 1,230 games.
 
 ## Developer notes

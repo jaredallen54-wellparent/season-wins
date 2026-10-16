@@ -117,6 +117,27 @@ if (!process.env.FIREBASE_DATABASE_EMULATOR_HOST) {
     await denied(api.setLines('WRONG', { BOS: 51.5 }));
   });
 
+  test('locks: up to 3, distinct, only on picked teams, frozen at the lock', async () => {
+    const { db, api, adminCode } = await fresh();
+    const me = await api.join('Amy');
+    await api.savePicks(me.id, { BOS: 'O', SAC: 'U', OKC: 'O', NYK: 'U' }, me, ['BOS', 'SAC', 'OKC']);
+    assert.deepEqual((await get(ref(db, `locks/${me.id}`))).val(), { a: 'BOS', b: 'SAC', c: 'OKC' });
+    await assert.rejects(api.savePicks(me.id, {}, me, ['BOS', 'SAC', 'OKC', 'NYK']), /only lock 3/);
+    await denied(api.savePicks(me.id, {}, me, ['BOS', 'BOS']));          // duplicate
+    await denied(api.savePicks(me.id, {}, me, ['BOS', 'MIA']));          // MIA not picked
+    await api.savePicks(me.id, { MIA: 'O' }, me, ['BOS', 'MIA']);        // pick + lock in one save
+    await api.savePicks(me.id, { MIA: null }, me, ['BOS']);              // clearing a pick drops its lock
+    assert.deepEqual((await get(ref(db, `locks/${me.id}`))).val(), { a: 'BOS' });
+    const other = await api.join('Bob');
+    await denied(api.savePicks(me.id, {}, other, ['BOS', 'SAC']));       // someone else's code
+    await denied(set(ref(db, `locks/${me.id}/b`), 'SAC'));               // no proof
+    await api.setLockAt(adminCode, PAST);
+    await denied(api.savePicks(me.id, {}, me, ['BOS', 'SAC']));          // locked
+    await api.savePicks(me.id, {}, { id: 'admin', code: adminCode }, ['BOS', 'SAC', 'OKC']); // admin can fix
+    await api.deletePlayer(adminCode, me.id, 'Amy');
+    assert.equal((await get(ref(db, `locks/${me.id}`))).val(), null);
+  });
+
   test('pick values validated', async () => {
     const { api } = await fresh();
     const { id, code } = await api.join('Amy');

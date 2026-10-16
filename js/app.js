@@ -4,7 +4,7 @@ import {
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-database.js';
 import { firebaseConfig } from './firebase-config.js';
 import { TEAMS, DEFAULT_LINES, DEFAULT_LOCK_AT, GAMES_PER_TEAM, LEAGUE_GAMES } from './teams.js';
-import { teamPace, pickStatus, leaderboard, seasonProgress } from './scoring.js';
+import { teamPace, pickStatus, leaderboard, seasonProgress, LOCKS_PER_PLAYER } from './scoring.js';
 import { makeApi, UserError, normalizeCode } from './api.js';
 
 // ---------- setup ----------
@@ -55,6 +55,7 @@ const S = {
   me: store.get('swou:me'), // {id, name, code}
   adminCode: store.get('swou:admin'),
   pending: {},              // pid -> {team: 'O'|'U'|null} not yet saved
+  pendingLocks: {},         // pid -> [team, ...] full lock list not yet saved
   saveState: '',            // '', 'saving', 'saved', or an error message
   shownCode: null,          // code to show once after join/claim/reset
   confirmDelete: null,
@@ -69,7 +70,14 @@ function picksFor(pid) {
   for (const [t, v] of Object.entries(S.pending[pid] || {})) { if (v) p[t] = v; else delete p[t]; }
   return p;
 }
-const players = () => Object.entries(S.db.players || {}).map(([id, p]) => ({ id, name: p.name, picks: picksFor(id) }));
+/** The player's locks (up to 3), including unsaved changes, limited to teams they've picked. */
+function locksFor(pid) {
+  const saved = Object.values(S.db.locks?.[pid] || {});
+  const picks = picksFor(pid);
+  return (S.pendingLocks[pid] ?? saved).filter(c => picks[c]);
+}
+const players = () => Object.entries(S.db.players || {}).map(([id, p]) => ({ id, name: p.name, picks: picksFor(id), locks: locksFor(id) }));
+const LOCK = '🔒';
 const byName = (a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
 const meJoined = () => !!(S.me && S.db.players?.[S.me.id]);
 
@@ -89,8 +97,8 @@ const fmtDate = (ms, tz) => new Date(ms).toLocaleString(undefined, {
 });
 const lockText = () => fmtDate(lockAt(), 'America/New_York');
 const GLYPH = { won: '✓', ahead: '▲', even: '–', behind: '▼', lost: '✕' };
-const WORD = { won: 'locked in', ahead: 'on pace', even: 'even', behind: 'behind pace', lost: 'out of reach' };
-const SHORT = { won: 'locked', ahead: 'on pace', even: 'even', behind: 'behind', lost: 'out' };
+const WORD = { won: 'clinched', ahead: 'on pace', even: 'even', behind: 'behind pace', lost: 'out of reach' };
+const SHORT = { won: 'clinched', ahead: 'on pace', even: 'even', behind: 'behind', lost: 'out' };
 const ORDER = ['won', 'ahead', 'even', 'behind', 'lost'];
 const SOURCE_NAMES = { espn: 'ESPN', nbaSchedule: 'NBA.com', manual: 'entered by admin', seed: 'season not started' };
 const glyph = s => `<i class="glyph s-${s}" aria-hidden="true">${GLYPH[s]}</i>`;
@@ -138,8 +146,10 @@ function introView() {
   let cta;
   if (meJoined()) {
     const n = Object.keys(picksFor(S.me.id)).length;
-    cta = `<a class="btn primary" href="#/picks">${locked ? 'View my picks' : 'Edit my picks'} · ${n} of 30</a>
-      <span>Playing as <b>${esc(S.db.players[S.me.id].name)}</b></span>`;
+    const k = locksFor(S.me.id).length;
+    const todo = !locked && (n < 30 || k < LOCKS_PER_PLAYER) ? ` <b>Still to do:</b> ${[n < 30 ? `${30 - n} pick${30 - n === 1 ? '' : 's'}` : '', k < LOCKS_PER_PLAYER ? `${LOCKS_PER_PLAYER - k} lock${LOCKS_PER_PLAYER - k === 1 ? '' : 's'}` : ''].filter(Boolean).join(' and ')}.` : '';
+    cta = `<a class="btn primary" href="#/picks">${locked ? 'View my picks' : 'Edit my picks'} · ${n}/30 · ${LOCK} ${k}/${LOCKS_PER_PLAYER}</a>
+      <span>Playing as <b>${esc(S.db.players[S.me.id].name)}</b>.${todo}</span>`;
   } else if (!locked) {
     cta = `<a class="btn primary" href="#/join">Join the game</a><a class="btn ghost" href="#/signin">I already joined</a>
       <span>No account needed, just a name.</span>`;
@@ -149,9 +159,9 @@ function introView() {
   return `<section class="intro" aria-labelledby="intro-h">
     <div class="intro-head"><h2 id="intro-h">How it works</h2><a class="small" href="#/rules">Full rules</a></div>
     <ol class="steps">
-      <li><div><b>Pick all 30 teams</b>Each team has a win-total line, like 47.5. Pick Over or Under for every team.</div></li>
+      <li><div><b>Pick all 30, lock 3</b>Pick Over or Under on every team's win total (like 47.5). Then mark your 3 most confident picks as ${LOCK} locks.</div></li>
       <li><div><b>Picks lock at tip-off</b>${lockText()}. After that, nobody can change them.</div></li>
-      <li><div><b>Track it all season</b>Your score is picks locked in plus picks on pace. At season's end, the most correct picks wins.</div></li>
+      <li><div><b>Score points</b>Each right pick is +1. A right lock is +2, but a wrong lock is −1. Through the season, picks count at their current pace. Most points at the end wins.</div></li>
     </ol>
     <div class="intro-cta">${cta}</div>
   </section>`;
@@ -173,7 +183,7 @@ function keyView() {
 function leaderboardView() {
   const ps = players();
   const head = `<div class="sec-head"><h2>Leaderboard</h2>
-    <p class="hint">A pick is on track while its team is ahead of the pace its line needs (Over) or behind it (Under). It's locked in once the result can't change.</p></div>`;
+    <p class="hint">Points if every team finished at its current pace: +1 per pick on track, and ${LOCK} locks +2 on track or −1 off track. Clinched picks are final.</p></div>`;
   if (!ps.length) return head + `<ol class="lb"><li class="empty"><b>No players yet</b>Be the first: tap Join the game above.</li></ol>`;
   const st = standings();
   const rows = leaderboard(lines(), st.teams, ps);
@@ -186,11 +196,13 @@ function leaderboardView() {
     const counts = ORDER.map(s => `<span>${glyph(s)}<b>${c[s]}</b> ${SHORT[s]}</span>`).join('')
       + (c.unpicked ? `<span>${c.unpicked} unpicked</span>` : '');
     const you = S.me?.id === r.id ? ' <small>(you)</small>' : '';
+    const pts = r.points === 1 || r.points === -1 ? 'point' : 'points';
+    const lockNote = locked ? '' : ` · ${LOCK} ${r.locks.length} of ${LOCKS_PER_PLAYER} locks`;
     const row = `<div class="lb-row"><div class="rk" aria-label="Rank ${r.rank}">${r.rank}</div><div style="min-width:0">
-        <div class="lb-top"><span class="lb-name">${esc(r.name)}${you}</span><span class="lb-score"><b>${r.onTrack}</b>of 30 picks on track</span></div>
+        <div class="lb-top"><span class="lb-name">${esc(r.name)}${you}</span><span class="lb-score"><b>${r.points}</b>${pts} · ${r.onTrack} of 30 on track</span></div>
         <div class="stack" role="img" aria-label="${ORDER.map(s => `${c[s]} ${WORD[s]}`).join(', ')}${c.unpicked ? `, ${c.unpicked} unpicked` : ''}">${segs}</div>
         <div class="lb-counts">${counts}</div></div></div>`;
-    if (!locked) return `<li>${row}<p class="note" style="padding:0 18px 14px 70px;margin:0">${picked} of 30 picked · picks revealed at the lock</p></li>`;
+    if (!locked) return `<li>${row}<p class="note" style="padding:0 18px 14px 70px;margin:0">${picked} of 30 picked${lockNote} · picks revealed at the lock</p></li>`;
     return `<li><details data-pid="${r.id}"><summary>${row}</summary>${playerDetail(r)}</details></li>`;
   }).join('');
   return head + keyView() + `<ol class="lb">${items}</ol>`;
@@ -199,13 +211,18 @@ function leaderboardView() {
 function playerDetail(r) {
   const L = lines();
   const pk = picksFor(r.id);
+  const lk = new Set(r.locks);
+  const locksLine = r.locks.length ? `<div class="grp"><span class="grp-l">${LOCK} Locks</span>${r.locks.map(c => {
+    const s = r.statuses[c];
+    return `<span class="chip lock s-${s}"><i aria-hidden="true">${GLYPH[s]}</i><span>${c} ${pk[c]} ${L[c]}</span><span class="sr-only"> lock, ${WORD[s]}</span></span>`;
+  }).join('')}</div>` : '';
   const groups = ORDER.map(s => {
     const teams = Object.entries(r.statuses).filter(([, v]) => v === s).map(([c]) => c).sort();
     if (!teams.length) return '';
     return `<div class="grp"><span class="grp-l">${WORD[s]}</span>${teams.map(c =>
-      `<span class="chip s-${s}" title="${c} ${pk[c] === 'O' ? 'Over' : 'Under'} ${L[c]}"><i aria-hidden="true">${GLYPH[s]}</i><span>${c} ${pk[c]} ${L[c]}</span></span>`).join('')}</div>`;
+      `<span class="chip s-${s}${lk.has(c) ? ' lock' : ''}" title="${c} ${pk[c] === 'O' ? 'Over' : 'Under'} ${L[c]}${lk.has(c) ? ' (lock)' : ''}"><i aria-hidden="true">${GLYPH[s]}</i><span>${c} ${pk[c]} ${L[c]}</span></span>`).join('')}</div>`;
   }).join('');
-  return `<div class="lb-detail">${groups || '<p class="none">No picks.</p>'}</div>`;
+  return `<div class="lb-detail">${locksLine}${groups || '<p class="none">No picks.</p>'}</div>`;
 }
 
 function teamsView() {
@@ -215,7 +232,7 @@ function teamsView() {
   const ps = players().sort(byName);
   const rows = TEAMS.filter(t => S.ui.conf === 'All' || t.conf === S.ui.conf).map(t => {
     const s = st.teams[t.code] || { w: 0, l: 0 };
-    const pace = teamPace(L[t.code], s.w, s.l);
+    const pace = { ...teamPace(L[t.code], s.w, s.l), code: t.code };
     const o = ps.filter(p => p.picks[t.code] === 'O'), u = ps.filter(p => p.picks[t.code] === 'U');
     return { t, pace, o, u };
   });
@@ -231,7 +248,8 @@ function teamsView() {
   rows.sort(cmp[S.ui.sort]);
   const chip = (p, v, pace) => {
     const s = pickStatus(pace, v);
-    return `<span class="chip s-${s}${S.me?.id === p.id ? ' me' : ''}" title="${esc(p.name)}: ${v === 'O' ? 'Over' : 'Under'} ${pace.line}, ${WORD[s]}"><i aria-hidden="true">${GLYPH[s]}</i><span>${esc(p.name)}</span><span class="sr-only"> ${WORD[s]}</span></span>`;
+    const isLock = p.locks.includes(pace.code);
+    return `<span class="chip s-${s}${S.me?.id === p.id ? ' me' : ''}${isLock ? ' lock' : ''}" title="${esc(p.name)}: ${v === 'O' ? 'Over' : 'Under'} ${pace.line}${isLock ? ' (lock)' : ''}, ${WORD[s]}"><i aria-hidden="true">${GLYPH[s]}</i><span>${esc(p.name)}</span><span class="sr-only">${isLock ? ' lock,' : ''} ${WORD[s]}</span></span>`;
   };
   const html = rows.map(({ t, pace: p, o, u }) => {
     const max = p.line * 1.25;
@@ -330,49 +348,72 @@ function picksView(pid) {
   const picks = picksFor(pid);
   const L = lines();
   const n = Object.keys(picks).length;
+  const myLocks = locksFor(pid);
+  const k = myLocks.length;
   const sorted = [...TEAMS].sort((a, b) => L[b.code] - L[a.code] || a.name.localeCompare(b.name));
   const save = S.saveState === 'saving' ? 'Saving…' : S.saveState === 'saved' ? 'Saved ✓' : S.saveState ? `⚠ ${esc(S.saveState)}` : (locked && !asAdmin ? 'Picks are locked' : 'Picks are open');
   const rows = sorted.map(t => {
     const v = picks[t.code];
-    return `<div class="pk"><div class="pk-n"><b>${esc(t.name)}</b><small>${t.conf} · win total ${L[t.code]}</small></div>
-      <div class="tg" role="group" aria-label="${esc(t.name)} pick">
+    const isLock = myLocks.includes(t.code);
+    const lockOff = !canEdit || !v || (!isLock && k >= LOCKS_PER_PLAYER);
+    return `<div class="pk${isLock ? ' is-lock' : ''}"><div class="pk-n"><b>${esc(t.name)}</b><small>${t.conf} · win total ${L[t.code]}${isLock ? ` · <span class="lk-note">${LOCK} lock</span>` : ''}</small></div>
+      <div class="pk-ctl"><div class="tg" role="group" aria-label="${esc(t.name)} pick">
         <button type="button" data-pick="${t.code}" data-v="O" aria-pressed="${v === 'O'}" ${canEdit ? '' : 'disabled'}>Over</button>
         <button type="button" data-pick="${t.code}" data-v="U" aria-pressed="${v === 'U'}" ${canEdit ? '' : 'disabled'}>Under</button>
-      </div></div>`;
+      </div><button type="button" class="lockbtn" data-lock="${t.code}" aria-pressed="${isLock}" aria-label="Make ${esc(t.name)} a lock" title="${!v ? 'Pick a side first' : isLock ? 'Remove lock' : k >= LOCKS_PER_PLAYER ? 'All 3 locks used' : 'Make this a lock'}" ${lockOff ? 'disabled' : ''}>${LOCK}</button></div></div>`;
   }).join('');
   return `<div class="sec-head"><h2>${asAdmin ? `Editing ${esc(S.db.players[pid].name)}` : 'My picks'}</h2>
-      <p class="hint">${locked && !asAdmin ? 'Locked in for the season. Good luck!' : `Pick Over or Under for every team. Tap a selected pick again to clear it. Saves automatically. Locks ${lockText()}.`}</p></div>
+      <p class="hint">${locked && !asAdmin ? 'Locked in for the season. Good luck!' : `Pick Over or Under for every team, then tap ${LOCK} on your ${LOCKS_PER_PLAYER} most confident picks (+2 if right, −1 if wrong). Tap a selection again to clear it. Saves automatically. Picks lock ${lockText()}.`}</p></div>
     <div data-pid="${pid}">
-      <div class="pk-head"><span><b>${esc(S.db.players[pid].name)}</b> · ${n} of 30 picked</span><span role="status">${save}</span></div>
+      <div class="pk-head"><span><b>${esc(S.db.players[pid].name)}</b> · ${n} of 30 picked · <span class="${k < LOCKS_PER_PLAYER && !locked ? 'lk-need' : ''}">${LOCK} ${k} of ${LOCKS_PER_PLAYER} locks</span></span><span role="status">${save}</span></div>
       <div class="pk-list">${rows}</div>
     </div>
     <p class="note" style="margin-top:14px">${asAdmin ? '<a href="#/admin">Back to admin</a>' : `Playing as ${esc(S.db.players[pid].name)} · <button class="link" data-show-code="me">Show my edit code</button> · <button class="link" data-signout>Sign out on this device</button>`}</p>`;
 }
 
 let saveTimer = null;
-function queuePick(pid, team, v) {
-  const next = picksFor(pid)[team] === v ? null : v;
-  S.pending[pid] = { ...(S.pending[pid] || {}), [team]: next };
+function scheduleSave(pid) {
   S.saveState = 'saving';
   render();
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => flush(pid), 700);
 }
+function queuePick(pid, team, v) {
+  const next = picksFor(pid)[team] === v ? null : v;
+  const locks = locksFor(pid);
+  S.pending[pid] = { ...(S.pending[pid] || {}), [team]: next };
+  if (!next && locks.includes(team)) S.pendingLocks[pid] = locks.filter(c => c !== team); // clearing a pick drops its lock
+  scheduleSave(pid);
+}
+function toggleLock(pid, team) {
+  const locks = locksFor(pid);
+  if (locks.includes(team)) S.pendingLocks[pid] = locks.filter(c => c !== team);
+  else if (!picksFor(pid)[team]) return toast('Pick Over or Under first.');
+  else if (locks.length >= LOCKS_PER_PLAYER) return toast(`All ${LOCKS_PER_PLAYER} locks used. Remove one first.`);
+  else S.pendingLocks[pid] = [...locks, team];
+  scheduleSave(pid);
+}
 async function flush(pid) {
-  const changes = S.pending[pid];
-  if (!changes || !Object.keys(changes).length) return;
+  const changes = { ...(S.pending[pid] || {}) };
+  const locks = S.pendingLocks[pid];
+  if (!Object.keys(changes).length && !locks) return;
   const asSelf = pid === S.me?.id && (!isLocked() || !S.adminCode);
   const auth = asSelf ? { id: S.me.id, code: S.me.code } : { id: 'admin', code: S.adminCode };
   try {
-    await api.savePicks(pid, changes, auth);
+    await api.savePicks(pid, changes, auth, locks);
     // Drop only what we sent (more taps may have arrived meanwhile).
     for (const [t, v] of Object.entries(changes)) if (S.pending[pid]?.[t] === v) delete S.pending[pid][t];
+    if (S.pendingLocks[pid] === locks) delete S.pendingLocks[pid];
     S.saveState = 'saved';
   } catch (e) {
-    S.saveState = /permission/i.test(e.message)
+    const locksOff = locks && /permission/i.test(e.message) && !isLocked() && S.db.locks === null;
+    if (locksOff) delete S.pendingLocks[pid]; // so the next tap can still save picks
+    S.saveState = locksOff
+      ? 'Locks are not switched on yet. Ask the admin, then tap again.'
+      : /permission/i.test(e.message)
       ? (isLocked() && auth.id !== 'admin' ? 'Picks are locked' : "Couldn't save: your edit code may be wrong. Sign in again.")
       : "Couldn't save, try again";
-    if (isLocked() && auth.id !== 'admin') S.pending[pid] = {};
+    if (isLocked() && auth.id !== 'admin') { S.pending[pid] = {}; delete S.pendingLocks[pid]; }
   }
   render();
 }
@@ -382,16 +423,18 @@ function rulesView() {
   return `<div class="sec-head"><h2>How it works</h2></div>
   <div class="card prose">
     <p>Each NBA team has a win-total line. Lines always end in .5, so there are no ties. Pick <b>Over</b> or <b>Under</b> for all 30 teams before the first tip-off. Picks lock <b>${lockText()}</b>, and the database enforces it.</p>
-    <h3>Scoring during the season</h3>
+    <h3>${LOCK} Locks</h3>
+    <p>Mark exactly ${LOCKS_PER_PLAYER} of your picks as locks. A lock that hits is worth <b>+2</b>. A lock that misses costs you <b>−1</b>. Every other pick is <b>+1</b> if right and <b>0</b> if wrong. Locks freeze with your picks at tip-off.</p>
+    <h3>Pick status during the season</h3>
     <ul class="key" style="flex-direction:column;align-items:flex-start;gap:8px;margin:8px 0">
-      <li>${glyph('won')}<span><b>Locked in</b>: your side is clinched (the team already passed the line, or can't reach it).</span></li>
+      <li>${glyph('won')}<span><b>Clinched</b>: your side is clinched (the team already passed the line, or can't reach it).</span></li>
       <li>${glyph('ahead')}<span><b>On pace</b>: the team is running at the pace your pick needs.</span></li>
       <li>${glyph('even')}<span><b>Even</b>: exactly on pace, or no games yet.</span></li>
       <li>${glyph('behind')}<span><b>Behind pace</b>: the pace favours the other side, but it's not over.</span></li>
       <li>${glyph('lost')}<span><b>Out of reach</b>: the other side is clinched.</span></li>
     </ul>
-    <p>"Pace" compares wins so far with <i>line × games played ÷ 82</i>, which is where a team finishing exactly on its line would be right now. Your score is <b>locked in + on pace</b>. After all 82 games every pick is either locked in or out of reach, so your final score is simply how many you got right.</p>
-    <p>Ties: more locked-in picks ranks higher. Players tied on both share a rank.</p>
+    <p>"Pace" compares wins so far with <i>line × games played ÷ 82</i>, which is where a team finishing exactly on its line would be right now. Your live score counts every pick as if teams finish at their current pace: on track picks score (+1, or +2 for a lock), off-track locks cost −1. After all 82 games every pick is clinched or out of reach, so the live score becomes the final score.</p>
+    <p>Ties: more points from already-clinched picks ranks higher. Players tied on both share a rank.</p>
     <h3>Your edit code</h3>
     <p>There are no accounts. When you join, you get a random edit code, and this device remembers it. Save it to edit your picks from another device. Lost it? Ask the admin to reset it.</p>
   </div>`;
@@ -435,7 +478,7 @@ function adminView() {
 
     <div class="card"><h3>Players (${ps.length})</h3>
       <ul class="plist">${ps.map(p => `<li data-pid="${p.id}" data-name="${esc(p.name)}">
-        <span><b>${esc(p.name)}</b> · ${Object.keys(p.picks).length} of 30 picked</span>
+        <span><b>${esc(p.name)}</b> · ${Object.keys(p.picks).length} of 30 picked · ${LOCK} ${p.locks.length} of ${LOCKS_PER_PLAYER}</span>
         <span class="acts">
           <a class="btn sm ghost" href="#/picks/${p.id}">Edit picks</a>
           <button class="btn sm ghost" data-reset>Reset code</button>
@@ -485,7 +528,9 @@ addEventListener('hashchange', () => { S.saveState = ''; S.confirmDelete = null;
 $app.addEventListener('click', async e => {
   const b = e.target.closest('button, a');
   if (!b) return;
-  if (b.dataset.pick) {
+  if (b.dataset.lock) {
+    toggleLock(b.closest('[data-pid]').dataset.pid, b.dataset.lock);
+  } else if (b.dataset.pick) {
     const pid = b.closest('[data-pid]').dataset.pid;
     queuePick(pid, b.dataset.pick, b.dataset.v);
   } else if (b.dataset.conf) {

@@ -50,8 +50,10 @@ export function makeApi(sdk, db) {
     /** Live snapshot of everything public. cb({config, lines, players, picks, manualStandings}). */
     subscribe(cb, onError) {
       const state = {};
-      const paths = ['config', 'lines', 'players', 'picks', 'manualStandings'];
-      const unsubs = paths.map(p => onValue(ref(db, p), snap => { state[p] = snap.val(); cb({ ...state }); }, onError));
+      const paths = ['config', 'lines', 'players', 'picks', 'locks', 'manualStandings'];
+      const unsubs = paths.map(p => onValue(ref(db, p), snap => { state[p] = snap.val(); cb({ ...state }); },
+        // 'locks' is newer than the rest; if the database rules predate it, carry on without locks.
+        err => (p === 'locks' ? cb({ ...state, locks: null }) : onError?.(err))));
       return () => unsubs.forEach(u => u());
     },
 
@@ -87,9 +89,15 @@ export function makeApi(sdk, db) {
     },
 
     /** changes: {CODE: 'O'|'U'|null}. Works for the player before lock, or for admin any time. */
-    async savePicks(pid, changes, auth /* {id, code} */) {
+    /** changes: {CODE: 'O'|'U'|null}; locks (optional): the player's full list of up to 3 locked team codes. */
+    async savePicks(pid, changes, auth /* {id, code} */, locks) {
       const paths = {};
       for (const [team, v] of Object.entries(changes)) paths[`picks/${pid}/${team}`] = v ?? null;
+      if (locks) {
+        const slots = ['a', 'b', 'c'];
+        if (locks.length > slots.length) throw new UserError('You can only lock 3 picks.');
+        slots.forEach((slot, i) => { paths[`locks/${pid}/${slot}`] = locks[i] ?? null; });
+      }
       return proved(auth.id, auth.code, paths);
     },
 
@@ -121,7 +129,7 @@ export function makeApi(sdk, db) {
     deletePlayer(adminCode, pid, name) {
       return proved('admin', adminCode, {
         [`players/${pid}`]: null, [`names/${name.toLowerCase()}`]: null,
-        [`picks/${pid}`]: null, [`secrets/${pid}`]: null, [`proofs/${pid}`]: null,
+        [`picks/${pid}`]: null, [`locks/${pid}`]: null, [`secrets/${pid}`]: null, [`proofs/${pid}`]: null,
       });
     },
   };

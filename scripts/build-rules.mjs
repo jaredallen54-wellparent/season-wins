@@ -18,6 +18,11 @@ const beforeLock =
   `((root.child('config/lockAt').exists() && now < root.child('config/lockAt').val()) || ` +
   `(!root.child('config/lockAt').exists() && now < ${DEFAULT_LOCK_AT}))`;
 const teamRe = `/^(${TEAMS.map(t => t.code).join('|')})$/`;
+// A lock slot names a real team that this player has picked, and differs from the other slots.
+const lockSlot = (slot, others) =>
+  `newData.isString() && newData.val().matches(${teamRe}) && ` +
+  `${up(3)}.child('picks').child($pid).child(newData.val()).exists() && ` +
+  others.map(o => `newData.parent().child('${o}').val() !== newData.val()`).join(' && ');
 const NAME_RE = "/^[A-Za-z0-9]+([ '_.-][A-Za-z0-9]+)*$/";
 const PID_RE = '/^p[a-z0-9]{10,24}$/';
 
@@ -83,6 +88,17 @@ const rules = {
           '.write': 'newData.exists()',
           '.validate': "$hash === root.child('secrets').child($pid).val() && newData.val() === now",
         },
+      },
+    },
+    // Up to three locks per player, as fixed slots a/b/c (rules can't count children).
+    locks: {
+      '.read': true,
+      '$pid': {
+        '.write': `(${beforeLock} && root.child('players').child($pid).exists() && ${proof(2, '$pid')}) || ${admin(2)}`,
+        a: { '.validate': `${lockSlot('a', ['b', 'c'])}` },
+        b: { '.validate': `${lockSlot('b', ['a', 'c'])}` },
+        c: { '.validate': `${lockSlot('c', ['a', 'b'])}` },
+        '$other': { '.validate': false },
       },
     },
     picks: {
