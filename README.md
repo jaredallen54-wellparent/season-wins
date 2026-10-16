@@ -2,7 +2,7 @@
 
 A small web page for a friend group. Everyone picks **Over** or **Under** on all 30 NBA win totals before opening night. A live leaderboard scores everyone as the season goes. There are no accounts: each player gets a random **edit code** instead.
 
-- **Site:** plain HTML/CSS/JS with no build step, hosted free on **GitHub Pages**.
+- **Site:** plain HTML/CSS/JS with no build step, at **https://season-wins.web.app** (Firebase Hosting, free). The old GitHub Pages address forwards there and carries over each device's saved sign-in.
 - **Shared data:** **Firebase Realtime Database**, free "Spark" plan. Security comes from `database.rules.json`, which the database enforces itself.
 - **Standings:** a GitHub Action fetches the W–L records (ESPN first, NBA.com as backup) and commits `standings.json`. The admin can also enter standings by hand.
 - **Picks lock:** Tue **Oct 20, 2026 at 2:55 PM ET**, five minutes before the first tip-off (Celtics at Pistons, 3:00 PM ET on NBC). The database enforces the lock, so changing the page code can't get around it. The admin can still edit afterwards.
@@ -35,6 +35,9 @@ A small web page for a friend group. Everyone picks **Over** or **Under** on all
 ### 4. Share the link in the group chat 🎉
 
 ---
+
+### 5. Address: season-wins.web.app
+The GitHub Action publishes to Firebase Hosting when the repo has a `FIREBASE_SERVICE_ACCOUNT` secret (a Google Cloud service-account key with the **Firebase Hosting Admin** and **API Keys Viewer** roles). Once that works, GitHub Pages serves only a forwarding page (`redirect/`). Without the secret, GitHub Pages keeps serving the full site.
 
 ## Day-to-day
 

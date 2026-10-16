@@ -63,6 +63,26 @@ jobs:
         run: |
           mkdir _site
           cp -r index.html css js standings.json _site/
+
+      # Main site: Firebase Hosting (https://season-wins.web.app). Needs the FIREBASE_SERVICE_ACCOUNT secret.
+      - name: Deploy to Firebase Hosting
+        id: firebase
+        env:
+          SA: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: |
+          if [ -z "$SA" ]; then
+            echo "No FIREBASE_SERVICE_ACCOUNT secret yet; GitHub Pages keeps serving the full site."
+            echo "live=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          printf '%s' "$SA" > "$RUNNER_TEMP/sa.json"
+          export GOOGLE_APPLICATION_CREDENTIALS="$RUNNER_TEMP/sa.json"
+          npx --yes firebase-tools@13 deploy --only hosting --project season-wins --non-interactive
+          echo "live=true" >> "$GITHUB_OUTPUT"
+
+      # Old address (GitHub Pages): forwards to the new one once Firebase Hosting is live.
+      - name: Pick GitHub Pages content
+        run: |
+          if [ "${{ steps.firebase.outputs.live }}" = "true" ]; then rm -rf _site && cp -r redirect _site; fi
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
       - id: deployment

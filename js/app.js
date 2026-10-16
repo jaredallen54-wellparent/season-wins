@@ -32,6 +32,21 @@ const store = {
   get(k) { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } },
   set(k, v) { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, JSON.stringify(v)); } catch {} },
 };
+
+// Arriving from the old github.io address: take over that device's saved sign-in, then tidy the URL.
+(function importFromOldAddress() {
+  const m = location.hash.match(/^#\/import\/(.+)$/);
+  if (!m) return;
+  let to = '#/';
+  try {
+    const { carry, to: dest } = JSON.parse(decodeURIComponent(escape(atob(decodeURIComponent(m[1])))));
+    for (const [k, v] of Object.entries(carry || {})) {
+      if (/^swou:(me|admin|ui)$/.test(k) && typeof v === 'string' && localStorage.getItem(k) == null) localStorage.setItem(k, v);
+    }
+    if (typeof dest === 'string' && /^#\/[\w/-]*$/.test(dest)) to = dest;
+  } catch { /* bad link: ignore */ }
+  history.replaceState(null, '', location.pathname + location.search + to);
+})();
 const S = {
   db: { config: null, lines: null, players: null, picks: null, manualStandings: null },
   dbReady: false,

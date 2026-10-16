@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Season Wins Over/Under has moved</title>
+  <meta name="robots" content="noindex">
+  <link rel="canonical" href="https://season-wins.web.app/">
+  <script>
+    // The game moved to season-wins.web.app. Browsers keep sign-ins per address, so carry
+    // this device's saved player/admin code across in the URL fragment (never sent to a server).
+    (function () {
+      var NEW = 'https://season-wins.web.app/';
+      var carry = {};
+      try {
+        ['swou:me', 'swou:admin', 'swou:ui'].forEach(function (k) { var v = localStorage.getItem(k); if (v) carry[k] = v; });
+      } catch (e) {}
+      var to = location.hash || '#/';
+      var dest = Object.keys(carry).length
+        ? NEW + '#/import/' + encodeURIComponent(btoa(unescape(encodeURIComponent(JSON.stringify({ carry: carry, to: to })))))
+        : NEW + to;
+      location.replace(dest);
+    })();
+  </script>
+</head>
+<body style="font-family:system-ui,sans-serif;padding:24px">
+  <p>Season Wins Over/Under has moved to <a href="https://season-wins.web.app/">season-wins.web.app</a>.</p>
+</body>
+</html>
