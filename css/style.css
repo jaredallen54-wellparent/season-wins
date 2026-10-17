@@ -128,6 +128,7 @@ h2 { font-family: var(--font-display); font-weight: 700; text-transform: upperca
 .lb-row { display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 4px 6px; padding: 16px 18px 16px 12px; align-items: start; }
 .rk { font-family: var(--font-display); font-weight: 800; font-size: 2.4rem; line-height: .9; text-align: center; color: var(--muted); }
 .lb > li:first-child .rk { color: var(--brand-ink); }
+.lb.pre .rk, .lb.pre > li:first-child .rk { color: var(--muted); }
 .lb-top { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px 16px; }
 .lb-name { font-weight: 700; font-size: 17px; overflow-wrap: anywhere; min-width: 0; }
 .lb-name small { font-weight: 500; color: var(--muted); font-size: 13px; }

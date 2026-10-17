@@ -195,8 +195,8 @@ function keyView() {
 
 function leaderboardView() {
   const ps = players();
-  const head = `<div class="sec-head"><h2>Leaderboard</h2>
-    <p class="hint">Points if every team finished at its current pace: +1 per pick on track, and ${LOCK} locks +2 on track or −1 off track. Clinched picks are final.</p></div>`;
+  const head = `<div class="sec-head"><h2>Leaderboard</h2>${!isLocked() ? '</div>' : `
+    <p class="hint">Points if every team finished at its current pace: +1 per pick on track, and ${LOCK} locks +2 on track or −1 off track. Clinched picks are final.</p></div>`}`;
   if (!ps.length) return head + `<ol class="lb"><li class="empty"><b>No players yet</b>Be the first: tap Join the game above.</li></ol>`;
   const locked = isLocked();
   if (!locked) return head + preLockBoard(ps);
@@ -227,14 +227,14 @@ function preLockBoard(ps) {
     const mine = S.me?.id === p.id;
     const n = mine && S.picksLoaded ? Object.keys(picksFor(p.id)).length : sm?.picked;
     const k = mine && S.picksLoaded ? locksFor(p.id).length : sm?.locks;
-    const counts = n == null ? 'Picks hidden until the lock'
+    const counts = n == null ? '<span class="muted">Counts update when they next open the site</span>'
       : `${n} of 30 picked · <span class="${k < LOCKS_PER_PLAYER ? 'lk-need' : ''}">${LOCK} ${k} of ${LOCKS_PER_PLAYER} locks</span>${n === 30 && k === LOCKS_PER_PLAYER ? ' · ready ✓' : ''}`;
     return `<li><div class="lb-row"><div class="rk" aria-hidden="true">·</div><div style="min-width:0">
       <div class="lb-top"><span class="lb-name">${esc(p.name)}${mine ? ' <small>(you)</small>' : ''}</span></div>
       <div class="stack" role="img" aria-label="${n ?? 0} of 30 picked">${n ? `<span class="sg-ahead" style="flex:${n}"></span>` : ''}${30 - (n || 0) ? `<span class="sg-none" style="flex:${30 - (n || 0)}"></span>` : ''}</div>
       <div class="lb-counts"><span>${counts}</span></div></div></div></li>`;
   }).join('');
-  return `<p class="note" style="margin:-4px 0 12px">Everyone's picks and locks are hidden until ${lockText()}, then shown here with live points.</p><ol class="lb">${items}</ol>`;
+  return `<p class="note" style="margin:-4px 0 12px">Everyone's picks and locks are hidden until ${lockText()}, then shown here with live points.</p><ol class="lb pre">${items}</ol>`;
 }
 
 function playerDetail(r) {
