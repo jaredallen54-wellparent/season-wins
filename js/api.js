@@ -47,14 +47,22 @@ export function makeApi(sdk, db) {
   }
 
   return {
-    /** Live snapshot of everything public. cb({config, lines, players, picks, manualStandings}). */
+    /** Live snapshot of the always-public data. cb({config, lines, players, summary, manualStandings}). */
     subscribe(cb, onError) {
       const state = {};
-      const paths = ['config', 'lines', 'players', 'picks', 'locks', 'manualStandings'];
-      const unsubs = paths.map(p => onValue(ref(db, p), snap => { state[p] = snap.val(); cb({ ...state }); },
-        // 'locks' is newer than the rest; if the database rules predate it, carry on without locks.
-        err => (p === 'locks' ? cb({ ...state, locks: null }) : onError?.(err))));
+      const paths = ['config', 'lines', 'players', 'summary', 'manualStandings'];
+      const unsubs = paths.map(p => onValue(ref(db, p), snap => { state[p] = snap.val(); cb({ ...state }); }, onError));
       return () => unsubs.forEach(u => u());
+    },
+
+    /** Live listener on one path. Firebase cancels a listener the rules deny; onError then fires once. */
+    watch(path, cb, onError) {
+      return onValue(ref(db, path), snap => cb(snap.val()), onError);
+    },
+
+    /** Register this phone (anonymous-auth uid) as one of the player's devices, so it can read their picks before the lock. */
+    registerDevice(pid, code, uid) {
+      return proved(pid, code, { [`devices/${pid}/${uid}`]: true });
     },
 
     async findPlayerId(name) {
@@ -89,9 +97,13 @@ export function makeApi(sdk, db) {
     },
 
     /** changes: {CODE: 'O'|'U'|null}. Works for the player before lock, or for admin any time. */
-    /** changes: {CODE: 'O'|'U'|null}; locks (optional): the player's full list of up to 3 locked team codes. */
-    async savePicks(pid, changes, auth /* {id, code} */, locks) {
+    /**
+     * changes: {CODE: 'O'|'U'|null}; locks (optional): the player's full list of up to 3 locked team codes;
+     * summary (optional): {picked, locks} counts shown publicly before the lock.
+     */
+    async savePicks(pid, changes, auth /* {id, code} */, locks, summary) {
       const paths = {};
+      if (summary) paths[`summary/${pid}`] = { picked: summary.picked, locks: summary.locks };
       for (const [team, v] of Object.entries(changes)) paths[`picks/${pid}/${team}`] = v ?? null;
       if (locks) {
         const slots = ['a', 'b', 'c'];
@@ -117,7 +129,8 @@ export function makeApi(sdk, db) {
     clearManualStandings(code) { return proved('admin', code, { manualStandings: null }); },
     async resetPlayerCode(adminCode, pid) {
       const code = newEditCode();
-      await proved('admin', adminCode, { [`secrets/${pid}`]: await hashCode(code) });
+      // New code; phones registered with the old code lose access to the hidden picks.
+      await proved('admin', adminCode, { [`secrets/${pid}`]: await hashCode(code), [`devices/${pid}`]: null });
       return code;
     },
     renamePlayer(adminCode, pid, oldName, newName) {
@@ -129,7 +142,7 @@ export function makeApi(sdk, db) {
     deletePlayer(adminCode, pid, name) {
       return proved('admin', adminCode, {
         [`players/${pid}`]: null, [`names/${name.toLowerCase()}`]: null,
-        [`picks/${pid}`]: null, [`locks/${pid}`]: null, [`secrets/${pid}`]: null, [`proofs/${pid}`]: null,
+        [`picks/${pid}`]: null, [`locks/${pid}`]: null, [`summary/${pid}`]: null, [`devices/${pid}`]: null, [`secrets/${pid}`]: null, [`proofs/${pid}`]: null,
       });
     },
   };

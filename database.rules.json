@@ -6,7 +6,7 @@
       ".read": true,
       ".write": "newData.parent().child('proofs').child('admin').child(root.child('secrets').child('admin').val()).val() === now",
       "lockAt": {
-        ".validate": "newData.isNumber()"
+        ".validate": "newData.isNumber() && newData.val() > 1700000000000 && newData.val() < 1900000000000"
       },
       "$other": {
         ".validate": false
@@ -81,9 +81,35 @@
         }
       }
     },
-    "locks": {
+    "devices": {
+      "$pid": {
+        ".write": "newData.parent().parent().child('proofs').child('admin').child(root.child('secrets').child('admin').val()).val() === now",
+        "$uid": {
+          ".write": "auth != null && auth.uid === $uid && root.child('players').child($pid).exists() && newData.parent().parent().parent().child('proofs').child($pid).child(root.child('secrets').child($pid).val()).val() === now",
+          ".validate": "newData.val() === true"
+        }
+      }
+    },
+    "summary": {
       ".read": true,
       "$pid": {
+        ".write": "(((root.child('config/lockAt').exists() && now < root.child('config/lockAt').val()) || (!root.child('config/lockAt').exists() && now < 1792522500000)) && root.child('players').child($pid).exists() && newData.parent().parent().child('proofs').child($pid).child(root.child('secrets').child($pid).val()).val() === now) || newData.parent().parent().child('proofs').child('admin').child(root.child('secrets').child('admin').val()).val() === now",
+        ".validate": "newData.hasChildren(['picked', 'locks'])",
+        "picked": {
+          ".validate": "newData.isNumber() && newData.val() % 1 === 0 && newData.val() >= 0 && newData.val() <= 30"
+        },
+        "locks": {
+          ".validate": "newData.isNumber() && newData.val() % 1 === 0 && newData.val() >= 0 && newData.val() <= 3"
+        },
+        "$other": {
+          ".validate": false
+        }
+      }
+    },
+    "locks": {
+      ".read": "!((root.child('config/lockAt').exists() && now < root.child('config/lockAt').val()) || (!root.child('config/lockAt').exists() && now < 1792522500000))",
+      "$pid": {
+        ".read": "(auth != null && root.child('devices').child($pid).child(auth.uid).val() === true)",
         ".write": "(((root.child('config/lockAt').exists() && now < root.child('config/lockAt').val()) || (!root.child('config/lockAt').exists() && now < 1792522500000)) && root.child('players').child($pid).exists() && newData.parent().parent().child('proofs').child($pid).child(root.child('secrets').child($pid).val()).val() === now) || newData.parent().parent().child('proofs').child('admin').child(root.child('secrets').child('admin').val()).val() === now",
         "a": {
           ".validate": "newData.isString() && newData.val().matches(/^(ATL|BOS|BKN|CHA|CHI|CLE|DET|IND|MIA|MIL|NYK|ORL|PHI|TOR|WAS|DAL|DEN|GSW|HOU|LAC|LAL|MEM|MIN|NOP|OKC|PHX|POR|SAC|SAS|UTA)$/) && newData.parent().parent().parent().child('picks').child($pid).child(newData.val()).exists() && newData.parent().child('b').val() !== newData.val() && newData.parent().child('c').val() !== newData.val()"
@@ -100,9 +126,11 @@
       }
     },
     "picks": {
-      ".read": true,
+      ".read": "!((root.child('config/lockAt').exists() && now < root.child('config/lockAt').val()) || (!root.child('config/lockAt').exists() && now < 1792522500000))",
       "$pid": {
+        ".read": "(auth != null && root.child('devices').child($pid).child(auth.uid).val() === true)",
         ".write": "(((root.child('config/lockAt').exists() && now < root.child('config/lockAt').val()) || (!root.child('config/lockAt').exists() && now < 1792522500000)) && root.child('players').child($pid).exists() && newData.parent().parent().child('proofs').child($pid).child(root.child('secrets').child($pid).val()).val() === now) || newData.parent().parent().child('proofs').child('admin').child(root.child('secrets').child('admin').val()).val() === now",
+        ".validate": "(!newData.parent().parent().child('locks').child($pid).child('a').exists() || newData.child(newData.parent().parent().child('locks').child($pid).child('a').val()).exists()) && (!newData.parent().parent().child('locks').child($pid).child('b').exists() || newData.child(newData.parent().parent().child('locks').child($pid).child('b').val()).exists()) && (!newData.parent().parent().child('locks').child($pid).child('c').exists() || newData.child(newData.parent().parent().child('locks').child($pid).child('c').val()).exists())",
         "$team": {
           ".validate": "$team.matches(/^(ATL|BOS|BKN|CHA|CHI|CLE|DET|IND|MIA|MIL|NYK|ORL|PHI|TOR|WAS|DAL|DEN|GSW|HOU|LAC|LAL|MEM|MIN|NOP|OKC|PHX|POR|SAC|SAS|UTA)$/) && newData.isString() && (newData.val() === 'O' || newData.val() === 'U')"
         }

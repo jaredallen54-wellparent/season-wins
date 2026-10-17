@@ -17,6 +17,14 @@ const admin = d => proof(d, "'admin'");
 const beforeLock =
   `((root.child('config/lockAt').exists() && now < root.child('config/lockAt').val()) || ` +
   `(!root.child('config/lockAt').exists() && now < ${DEFAULT_LOCK_AT}))`;
+const afterLock = `!${beforeLock}`;
+// Before the lock, a player's picks are readable only from a phone registered to that player
+// (Firebase Anonymous Auth uid, registered with the player's edit-code proof). Nobody else, admin included.
+const ownDevice = pid => `(auth != null && root.child('devices').child(${pid}).child(auth.uid).val() === true)`;
+const playerWrite = d => `(${beforeLock} && root.child('players').child($pid).exists() && ${proof(d, '$pid')}) || ${admin(d)}`;
+// Every lock slot that will exist after this write must name a team that will have a pick.
+const locksHavePicks = (picksNode, locksNode) => ['a', 'b', 'c'].map(slot =>
+  `(!${locksNode}.child('${slot}').exists() || ${picksNode}.child(${locksNode}.child('${slot}').val()).exists())`).join(' && ');
 const teamRe = `/^(${TEAMS.map(t => t.code).join('|')})$/`;
 // A lock slot names a real team that this player has picked, and differs from the other slots.
 const lockSlot = (slot, others) =>
@@ -33,7 +41,7 @@ const rules = {
     config: {
       '.read': true,
       '.write': admin(1),
-      lockAt: { '.validate': 'newData.isNumber()' },
+      lockAt: { '.validate': 'newData.isNumber() && newData.val() > 1700000000000 && newData.val() < 1900000000000' },
       '$other': { '.validate': false },
     },
     lines: {
@@ -90,11 +98,34 @@ const rules = {
         },
       },
     },
-    // Up to three locks per player, as fixed slots a/b/c (rules can't count children).
-    locks: {
+    // Phones registered to a player (for reading their own picks before the lock). Never readable.
+    devices: {
+      '$pid': {
+        '.write': admin(2), // admin clears these when resetting a code or deleting a player
+        '$uid': {
+          '.write': `auth != null && auth.uid === $uid && root.child('players').child($pid).exists() && ${proof(3, '$pid')}`,
+          '.validate': 'newData.val() === true',
+        },
+      },
+    },
+    // Counts only, public, so the board can show "22 of 30 picked · 2 of 3 locks" before the lock.
+    summary: {
       '.read': true,
       '$pid': {
-        '.write': `(${beforeLock} && root.child('players').child($pid).exists() && ${proof(2, '$pid')}) || ${admin(2)}`,
+        '.write': playerWrite(2),
+        '.validate': "newData.hasChildren(['picked', 'locks'])",
+        picked: { '.validate': 'newData.isNumber() && newData.val() % 1 === 0 && newData.val() >= 0 && newData.val() <= 30' },
+        locks: { '.validate': 'newData.isNumber() && newData.val() % 1 === 0 && newData.val() >= 0 && newData.val() <= 3' },
+        '$other': { '.validate': false },
+      },
+    },
+    // Up to three locks per player, as fixed slots a/b/c (rules can't count children).
+    // Hidden until the lock (except from the player's own registered phone), then public.
+    locks: {
+      '.read': afterLock,
+      '$pid': {
+        '.read': ownDevice('$pid'),
+        '.write': playerWrite(2),
         a: { '.validate': `${lockSlot('a', ['b', 'c'])}` },
         b: { '.validate': `${lockSlot('b', ['a', 'c'])}` },
         c: { '.validate': `${lockSlot('c', ['a', 'b'])}` },
@@ -102,9 +133,12 @@ const rules = {
       },
     },
     picks: {
-      '.read': true,
+      '.read': afterLock,
       '$pid': {
-        '.write': `(${beforeLock} && root.child('players').child($pid).exists() && ${proof(2, '$pid')}) || ${admin(2)}`,
+        '.read': ownDevice('$pid'),
+        '.write': playerWrite(2),
+        // A locked team can't lose its pick unless the lock goes in the same save.
+        '.validate': locksHavePicks('newData', `${up(2)}.child('locks').child($pid)`),
         '$team': { '.validate': `$team.matches(${teamRe}) && newData.isString() && (newData.val() === 'O' || newData.val() === 'U')` },
       },
     },

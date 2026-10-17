@@ -2,3 +2,4 @@ node_modules/
 *.log
 .firebase/
 _site/
+tests/e2e/shots/

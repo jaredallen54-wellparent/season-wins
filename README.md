@@ -62,10 +62,18 @@ In the Firebase console, open **Realtime Database → Data**, delete the `secret
 
 ## How the security works (no accounts)
 
-- When you join, your browser creates a random 12-character code, such as `K7QM-3XRT-9PWD`. That is about 59 bits of randomness, far too many combinations to guess. Only its **SHA-256 hash** goes to the database, at `secrets/<player>`, and **nobody can read** that location.
-- Every save of your picks also writes a proof to `proofs/<player>/<hash>`, stamped with the server's clock. The rules accept the pick change only if a proof exists at the path named by *your* stored hash, stamped at *this exact moment*. Only someone who knows the code can produce that path. Old proofs can't be reused, and nobody can read them.
-- The rules also enforce: names unique regardless of capitalization (2–24 characters), picks only `O`/`U` for real teams, no new players or pick changes after the lock (except by the admin), and only the admin can change lines, the lock time, manual standings, or players.
-- Picks are hidden on the page until the lock, but they are not secret. Someone technical could read them from the database before the lock.
+- When you join, your browser creates a random 12-character code (about 59 bits, so it can't be guessed). Only its **SHA-256 hash** is stored, at `secrets/<player>`, and **nobody can read** `secrets/`.
+- Every save also writes a proof to `proofs/<player>/<hash>` stamped with the server clock. The rules accept the change only if a proof exists at the path named by *that player's* stored hash, made *in this same request*. Old proofs can't be replayed. Proofs are unreadable.
+- **Picks and locks are hidden until the lock, enforced by the database.** Before `config/lockAt`, `picks/` and `locks/` can't be read by anyone, the admin included, except a player reading **their own** picks from a phone registered to them. Each phone signs in with **Firebase Anonymous Authentication** (invisible, no account). When a player joins or signs in with their code, the app writes `devices/<player>/<phone id>` together with a code proof. After the lock, everyone can read all picks and locks, including visitors who never joined.
+- Before the lock the board shows only counts from `summary/<player>` (`{picked, locks}`), saved with every pick change. The rules check the ranges but can't count picks, so a player could fake their own counts. That only affects the pre-lock progress display; after the lock the board uses the real picks.
+- Pages left open across the lock: the app uses the server clock (`.info/serverTimeOffset`), sets a timer for `lockAt`, re-subscribes to everyone's picks, and retries every 15 s (then every minute) if the database refuses at first.
+- The rules also enforce:
+  - names unique regardless of capitalization (2–24 characters);
+  - picks only `O`/`U` for real teams;
+  - at most 3 distinct locks, each on a picked team, and a locked pick can't be cleared without removing its lock;
+  - no joining or player changes after the lock;
+  - lines, the lock time, hand-entered standings, renames, deletes and code resets are admin-only.
+- Resetting a player's code also unregisters their phones.
 
 ## Scoring
 Pure functions in [`js/scoring.js`](js/scoring.js), tested in [`tests/scoring.test.js`](tests/scoring.test.js).
@@ -85,6 +93,7 @@ Pure functions in [`js/scoring.js`](js/scoring.js), tested in [`tests/scoring.te
 npm install            # only needed for the rules tests
 npm test               # scoring, team-name mapping, feed parsers
 npm run test:rules     # rebuilds database.rules.json, runs it in the Firebase emulator (needs Java)
+npm run test:e2e       # browser test across the lock moment (auth + database emulators, Playwright)
 npm run rules          # rebuild database.rules.json after editing scripts/build-rules.mjs
 node scripts/fetch-standings.mjs --dry-run   # try the live feeds
 ```

@@ -2,6 +2,7 @@ import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.14.1/fireba
 import {
   getDatabase, connectDatabaseEmulator, ref, update, get, onValue, serverTimestamp,
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-database.js';
+import { getAuth, connectAuthEmulator, signInAnonymously, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js';
 import { firebaseConfig } from './firebase-config.js';
 import { TEAMS, DEFAULT_LINES, DEFAULT_LOCK_AT, GAMES_PER_TEAM, LEAGUE_GAMES } from './teams.js';
 import { teamPace, pickStatus, leaderboard, seasonProgress, LOCKS_PER_PLAYER } from './scoring.js';
@@ -22,8 +23,10 @@ if (!config) {
     <code>js/firebase-config.js</code> (see the README).</p></div>`;
   throw new Error('No Firebase config');
 }
-const db = getDatabase(initializeApp(config));
-if (useEmulator) connectDatabaseEmulator(db, '127.0.0.1', 9000);
+const fbApp = initializeApp(config);
+const db = getDatabase(fbApp);
+const auth = getAuth(fbApp);
+if (useEmulator) { connectDatabaseEmulator(db, '127.0.0.1', 9000); connectAuthEmulator(auth, 'http://127.0.0.1:9099', { disableWarnings: true }); }
 const api = makeApi({ ref, update, get, onValue, serverTimestamp }, db);
 
 // ---------- state ----------
@@ -50,6 +53,13 @@ const store = {
 const S = {
   db: { config: null, lines: null, players: null, picks: null, manualStandings: null },
   dbReady: false,
+  offset: 0,                // server clock minus this phone's clock (ms)
+  uid: null,                // this phone's anonymous sign-in id
+  authError: null,
+  device: store.get('swou:device'), // "playerId:uid" once this phone is registered to the player
+  picksMode: 'none',        // which picks we're listening to: 'none' | 'mine' (before the lock) | 'all' (after)
+  picksLoaded: false,       // first answer received for the current mode
+  picksError: null,
   dbError: null,
   file: null,               // standings.json
   me: store.get('swou:me'), // {id, name, code}
@@ -64,7 +74,9 @@ const S = {
 
 const lines = () => ({ ...DEFAULT_LINES, ...(S.db.lines || {}) });
 const lockAt = () => S.db.config?.lockAt ?? DEFAULT_LOCK_AT;
-const isLocked = () => Date.now() >= lockAt();
+// The database rules use the server's clock, so the page does too (phones' clocks can be off).
+const serverNow = () => Date.now() + (S.offset || 0);
+const isLocked = () => serverNow() >= lockAt();
 function picksFor(pid) {
   const p = { ...(S.db.picks?.[pid] || {}) };
   for (const [t, v] of Object.entries(S.pending[pid] || {})) { if (v) p[t] = v; else delete p[t]; }
@@ -145,8 +157,9 @@ function introView() {
   const locked = isLocked();
   let cta;
   if (meJoined()) {
-    const n = Object.keys(picksFor(S.me.id)).length;
-    const k = locksFor(S.me.id).length;
+    const sm = S.db.summary?.[S.me.id] || { picked: 0, locks: 0 };
+    const n = S.picksLoaded ? Object.keys(picksFor(S.me.id)).length : sm.picked;
+    const k = S.picksLoaded ? locksFor(S.me.id).length : sm.locks;
     const todo = !locked && (n < 30 || k < LOCKS_PER_PLAYER) ? ` <b>Still to do:</b> ${[n < 30 ? `${30 - n} pick${30 - n === 1 ? '' : 's'}` : '', k < LOCKS_PER_PLAYER ? `${LOCKS_PER_PLAYER - k} lock${LOCKS_PER_PLAYER - k === 1 ? '' : 's'}` : ''].filter(Boolean).join(' and ')}.` : '';
     cta = `<a class="btn primary" href="#/picks">${locked ? 'View my picks' : 'Edit my picks'} · ${n}/30 · ${LOCK} ${k}/${LOCKS_PER_PLAYER}</a>
       <span>Playing as <b>${esc(S.db.players[S.me.id].name)}</b>.${todo}</span>`;
@@ -185,27 +198,43 @@ function leaderboardView() {
   const head = `<div class="sec-head"><h2>Leaderboard</h2>
     <p class="hint">Points if every team finished at its current pace: +1 per pick on track, and ${LOCK} locks +2 on track or −1 off track. Clinched picks are final.</p></div>`;
   if (!ps.length) return head + `<ol class="lb"><li class="empty"><b>No players yet</b>Be the first: tap Join the game above.</li></ol>`;
+  const locked = isLocked();
+  if (!locked) return head + preLockBoard(ps);
+  if (!S.picksLoaded) return head + `<ol class="lb"><li class="empty"><b>${S.picksError ? 'Revealing everyone\u2019s picks…' : 'Loading picks…'}</b>${S.picksError ? 'The picks just unlocked. This page will keep trying, no need to refresh.' : ''}</li></ol>`;
   const st = standings();
   const rows = leaderboard(lines(), st.teams, ps);
-  const locked = isLocked();
   const items = rows.map(r => {
     const c = r.counts;
-    const picked = 30 - c.unpicked;
     const segs = ORDER.map(s => c[s] ? `<span class="sg-${s}" style="flex:${c[s]}"></span>` : '').join('')
       + (c.unpicked ? `<span class="sg-none" style="flex:${c.unpicked}"></span>` : '');
     const counts = ORDER.map(s => `<span>${glyph(s)}<b>${c[s]}</b> ${SHORT[s]}</span>`).join('')
       + (c.unpicked ? `<span>${c.unpicked} unpicked</span>` : '');
     const you = S.me?.id === r.id ? ' <small>(you)</small>' : '';
     const pts = r.points === 1 || r.points === -1 ? 'point' : 'points';
-    const lockNote = locked ? '' : ` · ${LOCK} ${r.locks.length} of ${LOCKS_PER_PLAYER} locks`;
     const row = `<div class="lb-row"><div class="rk" aria-label="Rank ${r.rank}">${r.rank}</div><div style="min-width:0">
         <div class="lb-top"><span class="lb-name">${esc(r.name)}${you}</span><span class="lb-score"><b>${r.points}</b>${pts} · ${r.onTrack} of 30 on track</span></div>
         <div class="stack" role="img" aria-label="${ORDER.map(s => `${c[s]} ${WORD[s]}`).join(', ')}${c.unpicked ? `, ${c.unpicked} unpicked` : ''}">${segs}</div>
         <div class="lb-counts">${counts}</div></div></div>`;
-    if (!locked) return `<li>${row}<p class="note" style="padding:0 18px 14px 70px;margin:0">${picked} of 30 picked${lockNote} · picks revealed at the lock</p></li>`;
     return `<li><details data-pid="${r.id}"><summary>${row}</summary>${playerDetail(r)}</details></li>`;
   }).join('');
   return head + keyView() + `<ol class="lb">${items}</ol>`;
+}
+
+/** Before the lock: who has joined and how far along they are, from the public counts. No picks. */
+function preLockBoard(ps) {
+  const items = [...ps].sort(byName).map(p => {
+    const sm = S.db.summary?.[p.id];
+    const mine = S.me?.id === p.id;
+    const n = mine && S.picksLoaded ? Object.keys(picksFor(p.id)).length : sm?.picked;
+    const k = mine && S.picksLoaded ? locksFor(p.id).length : sm?.locks;
+    const counts = n == null ? 'Picks hidden until the lock'
+      : `${n} of 30 picked · <span class="${k < LOCKS_PER_PLAYER ? 'lk-need' : ''}">${LOCK} ${k} of ${LOCKS_PER_PLAYER} locks</span>${n === 30 && k === LOCKS_PER_PLAYER ? ' · ready ✓' : ''}`;
+    return `<li><div class="lb-row"><div class="rk" aria-hidden="true">·</div><div style="min-width:0">
+      <div class="lb-top"><span class="lb-name">${esc(p.name)}${mine ? ' <small>(you)</small>' : ''}</span></div>
+      <div class="stack" role="img" aria-label="${n ?? 0} of 30 picked">${n ? `<span class="sg-ahead" style="flex:${n}"></span>` : ''}${30 - (n || 0) ? `<span class="sg-none" style="flex:${30 - (n || 0)}"></span>` : ''}</div>
+      <div class="lb-counts"><span>${counts}</span></div></div></div></li>`;
+  }).join('');
+  return `<p class="note" style="margin:-4px 0 12px">Everyone's picks and locks are hidden until ${lockText()}, then shown here with live points.</p><ol class="lb">${items}</ol>`;
 }
 
 function playerDetail(r) {
@@ -267,8 +296,10 @@ function teamsView() {
     let picksCol;
     if (!ps.length) picksCol = '';
     else if (!locked) {
-      const n = o.length + u.length;
-      picksCol = `<p class="none">${n} of ${ps.length} player${ps.length === 1 ? '' : 's'} picked · revealed at the lock</p>`;
+      const mine = S.me && picksFor(S.me.id)[t.code];
+      picksCol = `<p class="none">Everyone's picks are revealed at the lock.${mine ? ` You picked <b>${mine === 'O' ? 'Over' : 'Under'}</b>${locksFor(S.me.id).includes(t.code) ? ` ${LOCK}` : ''}.` : ''}</p>`;
+    } else if (!S.picksLoaded) {
+      picksCol = '<p class="none">Revealing picks…</p>';
     } else {
       picksCol = `<div class="grp"><span class="grp-l">Over</span>${o.map(x => chip(x, 'O', p)).join('') || '<span class="none">No one</span>'}</div>
         <div class="grp"><span class="grp-l">Under</span>${u.map(x => chip(x, 'U', p)).join('') || '<span class="none">No one</span>'}</div>`;
@@ -344,6 +375,14 @@ function picksView(pid) {
   }
   if (asAdmin && !S.adminCode) return `<div class="card"><p>Admin sign-in needed.</p><a class="btn" href="#/admin">Admin</a></div>`;
   const locked = isLocked();
+  if (asAdmin && !locked) return `<div class="sec-head"><h2>Editing ${esc(S.db.players[pid].name)}</h2></div>
+    <div class="card"><p>Picks are hidden from everyone until ${lockText()}, the admin included. You can fix a player's picks after the lock.</p><a class="btn ghost" href="#/admin">Back to admin</a></div>`;
+  if (!S.picksLoaded) {
+    const why = S.authError ? `This phone couldn't sign in to the game (${esc(S.authError)}). Ask the admin to switch on Anonymous sign-in.`
+      : S.picksError && !locked ? esc(S.picksError) : 'Loading your picks…';
+    return `<div class="sec-head"><h2>${asAdmin ? `Editing ${esc(S.db.players[pid].name)}` : 'My picks'}</h2></div>
+      <div class="pk-list"><div class="empty"><b>${why}</b>${S.picksError && !locked ? '<div class="row-form" style="justify-content:center;margin-top:12px"><a class="btn ghost" href="#/signin">Sign in with code</a></div>' : ''}</div></div>`;
+  }
   const canEdit = asAdmin || !locked;
   const picks = picksFor(pid);
   const L = lines();
@@ -400,17 +439,14 @@ async function flush(pid) {
   const asSelf = pid === S.me?.id && (!isLocked() || !S.adminCode);
   const auth = asSelf ? { id: S.me.id, code: S.me.code } : { id: 'admin', code: S.adminCode };
   try {
-    await api.savePicks(pid, changes, auth, locks);
+    const knowAll = S.picksLoaded && (S.picksMode === 'all' || (S.picksMode === 'mine' && pid === S.me?.id));
+    await api.savePicks(pid, changes, auth, locks, knowAll ? summaryFor(pid) : undefined);
     // Drop only what we sent (more taps may have arrived meanwhile).
     for (const [t, v] of Object.entries(changes)) if (S.pending[pid]?.[t] === v) delete S.pending[pid][t];
     if (S.pendingLocks[pid] === locks) delete S.pendingLocks[pid];
     S.saveState = 'saved';
   } catch (e) {
-    const locksOff = locks && /permission/i.test(e.message) && !isLocked() && S.db.locks === null;
-    if (locksOff) delete S.pendingLocks[pid]; // so the next tap can still save picks
-    S.saveState = locksOff
-      ? 'Locks are not switched on yet. Ask the admin, then tap again.'
-      : /permission/i.test(e.message)
+    S.saveState = /permission/i.test(e.message)
       ? (isLocked() && auth.id !== 'admin' ? 'Picks are locked' : "Couldn't save: your edit code may be wrong. Sign in again.")
       : "Couldn't save, try again";
     if (isLocked() && auth.id !== 'admin') { S.pending[pid] = {}; delete S.pendingLocks[pid]; }
@@ -478,9 +514,9 @@ function adminView() {
 
     <div class="card"><h3>Players (${ps.length})</h3>
       <ul class="plist">${ps.map(p => `<li data-pid="${p.id}" data-name="${esc(p.name)}">
-        <span><b>${esc(p.name)}</b> · ${Object.keys(p.picks).length} of 30 picked · ${LOCK} ${p.locks.length} of ${LOCKS_PER_PLAYER}</span>
+        <span><b>${esc(p.name)}</b> · ${isLocked() && S.picksLoaded ? `${Object.keys(p.picks).length} of 30 picked · ${LOCK} ${p.locks.length} of ${LOCKS_PER_PLAYER}` : S.db.summary?.[p.id] ? `${S.db.summary[p.id].picked} of 30 picked · ${LOCK} ${S.db.summary[p.id].locks} of ${LOCKS_PER_PLAYER}` : 'picks hidden'}</span>
         <span class="acts">
-          <a class="btn sm ghost" href="#/picks/${p.id}">Edit picks</a>
+          ${isLocked() ? `<a class="btn sm ghost" href="#/picks/${p.id}">Edit picks</a>` : ''}
           <button class="btn sm ghost" data-reset>Reset code</button>
           <button class="btn sm ghost" data-rename>Rename</button>
           <button class="btn sm ${S.confirmDelete === p.id ? 'warn' : 'ghost'}" data-delete>${S.confirmDelete === p.id ? 'Confirm delete' : 'Delete'}</button>
@@ -546,7 +582,7 @@ $app.addEventListener('click', async e => {
     S.shownCode = null;
     if (location.hash === b.getAttribute('href')) render();
   } else if ('signout' in b.dataset) {
-    if (confirm('Sign out on this device? You will need your edit code to sign back in.')) { S.me = null; store.set('swou:me', null); location.hash = '#/'; }
+    if (confirm('Sign out on this device? You will need your edit code to sign back in.')) { S.me = null; store.set('swou:me', null); S.device = null; store.set('swou:device', null); syncPicks(); location.hash = '#/'; }
   } else if ('adminSignout' in b.dataset) {
     S.adminCode = null; store.set('swou:admin', null); render();
   } else if ('claim' in b.dataset) {
@@ -602,6 +638,7 @@ $app.addEventListener('submit', async e => {
     if (f.id === 'join-form') {
       const { id, code } = await api.join(data.name);
       S.me = { id, code, name: data.name.trim() }; store.set('swou:me', S.me);
+      registerThisPhone();
       S.shownCode = { code, title: "You're in!", next: '#/picks' };
       document.activeElement.blur(); render();
     } else if (f.id === 'signin-form') {
@@ -610,6 +647,7 @@ $app.addEventListener('submit', async e => {
       const code = normalizeCode(data.code);
       if (!(await api.verify(id, code))) return fail("That code doesn't match. Check it, or ask the admin to reset it.");
       S.me = { id, code, name: data.name.trim() }; store.set('swou:me', S.me);
+      S.device = null; registerThisPhone();
       document.activeElement.blur(); location.hash = '#/picks';
     } else if (f.id === 'admin-form') {
       const code = normalizeCode(data.code);
@@ -648,8 +686,78 @@ $app.addEventListener('submit', async e => {
 });
 
 // ---------- data ----------
-api.subscribe(state => { S.db = { ...S.db, ...state }; S.dbReady = true; S.dbError = null; render({ live: true }); },
+api.subscribe(state => { S.db = { ...S.db, ...state }; S.dbReady = true; S.dbError = null; syncPicks(); armLockTimer(); render({ live: true }); },
   err => { S.dbError = err.message; render({ live: true }); });
+onValue(ref(db, '.info/serverTimeOffset'), snap => { S.offset = snap.val() || 0; armLockTimer(); syncPicks(); });
+
+// Picks and locks are hidden by the database until the lock. Before it, this phone listens only to
+// its own player's picks (allowed once the phone is registered with the edit code). After it, it listens
+// to everyone's. Firebase cancels a listener the rules refuse, so we re-listen at the lock time and retry.
+let pickUnsubs = [], retryTimer = null, retries = 0;
+function stopPicks() { pickUnsubs.forEach(u => u()); pickUnsubs = []; clearTimeout(retryTimer); }
+function wantedMode() {
+  if (isLocked()) return 'all';
+  if (S.me && S.uid && S.device === `${S.me.id}:${S.uid}`) return 'mine';
+  return 'none';
+}
+function syncPicks(force = false) {
+  const mode = wantedMode();
+  if (!force && mode === S.picksMode && !S.picksError) return;
+  stopPicks();
+  const switching = mode !== S.picksMode;
+  S.picksMode = mode; S.picksError = null; if (switching) S.picksLoaded = false;
+  if (mode === 'none') { S.db.picks = {}; S.db.locks = {}; S.picksLoaded = false; return; }
+  const base = mode === 'all' ? '' : `/${S.me.id}`;
+  const got = { picks: false, locks: false };
+  const onData = key => val => {
+    S.db[key] = mode === 'all' ? (val || {}) : { [S.me.id]: val || {} };
+    got[key] = true;
+    if (got.picks && got.locks) { S.picksLoaded = true; retries = 0; if (mode === 'mine') backfillSummary(); }
+    render({ live: true });
+  };
+  const onErr = err => {
+    S.picksError = err?.message || 'denied';
+    stopPicks();
+    // After the lock the server may not agree yet (clock skew): try again soon, then less often.
+    // Before the lock a refusal means this phone isn't registered (e.g. code was reset): re-register.
+    if (mode === 'mine') { S.device = null; store.set('swou:device', null); registerThisPhone(); }
+    const wait = retries++ < 40 ? 15e3 : 60e3;
+    retryTimer = setTimeout(() => syncPicks(true), wait);
+    render({ live: true });
+  };
+  pickUnsubs = ['picks', 'locks'].map(key => api.watch(key + base, onData(key), onErr));
+}
+let lockTimer = null;
+function armLockTimer() {
+  clearTimeout(lockTimer);
+  const ms = lockAt() - serverNow();
+  if (ms <= 0) return;
+  // Wake a moment after the lock (capped so long waits re-check; browsers clamp huge timeouts).
+  lockTimer = setTimeout(() => { syncPicks(); armLockTimer(); render({ live: true }); }, Math.min(ms + 1500, 6 * 3600e3));
+}
+
+// Anonymous sign-in gives this phone an id the database rules can recognise. No account, no password.
+onAuthStateChanged(auth, user => { S.uid = user?.uid || null; registerThisPhone(); syncPicks(); render({ live: true }); });
+signInAnonymously(auth).catch(err => { S.authError = err?.code || err?.message || 'sign-in failed'; render({ live: true }); });
+let registering = null;
+async function registerThisPhone() {
+  if (!S.me || !S.uid || S.device === `${S.me.id}:${S.uid}` || registering) return;
+  const me = S.me, uid = S.uid;
+  registering = api.registerDevice(me.id, me.code, uid)
+    .then(() => { S.device = `${me.id}:${uid}`; store.set('swou:device', S.device); })
+    .catch(() => { S.picksError = "This phone couldn't be linked to your player. Sign in again with your edit code."; })
+    .finally(() => { registering = null; syncPicks(true); render({ live: true }); });
+}
+/** Keep the public counts right, e.g. for players who picked before counts existed. Before the lock only. */
+function backfillSummary() {
+  if (!S.me || isLocked() || Object.keys(S.pending[S.me.id] || {}).length || S.pendingLocks[S.me.id]) return;
+  const want = summaryFor(S.me.id);
+  const have = S.db.summary?.[S.me.id];
+  if (have && have.picked === want.picked && have.locks === want.locks) return;
+  api.savePicks(S.me.id, {}, { id: S.me.id, code: S.me.code }, undefined, want).catch(() => {});
+}
+const summaryFor = pid => ({ picked: Object.keys(picksFor(pid)).length, locks: locksFor(pid).length });
+
 async function loadFile() {
   try {
     const r = await fetch(`standings.json?t=${Date.now()}`, { cache: 'no-store' });
@@ -659,5 +767,5 @@ async function loadFile() {
 render();
 loadFile();
 setInterval(loadFile, 30 * 60e3);
-setInterval(() => render({ live: true }), 60e3); // countdown + lock flip
-document.addEventListener('visibilitychange', () => { if (!document.hidden) loadFile(); });
+setInterval(() => { syncPicks(); render({ live: true }); }, 60e3); // countdown, lock flip, waking from sleep
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { loadFile(); syncPicks(); armLockTimer(); } });
