@@ -3,7 +3,7 @@ name: Standings + deploy
 on:
   schedule:
     # ▼▼ STANDINGS SCHEDULE: the one line to change (times are UTC) ▼▼
-    - cron: "17 10 * * 1"        # weekly, Mondays 10:17 UTC (6:17 AM ET). Daily: "17 10 * * *"
+    - cron: "17 10 * * *"        # daily, 10:17 UTC (6:17 AM ET), after the night's games. Weekly (Mondays): "17 10 * * 1"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -31,8 +31,8 @@ jobs:
         with: { node-version: 22 }
       - run: node --test tests/scoring.test.js tests/teams.test.js tests/fetch.test.js
 
+  # Runs on the schedule, on "Run workflow", and on every push (so a code change also refreshes standings).
   standings:
-    if: github.event_name != 'push'
     needs: test
     runs-on: ubuntu-latest
     steps:
@@ -40,6 +40,8 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
       - name: Fetch standings
+        # On a push, a feed outage must not block publishing the code change.
+        continue-on-error: ${{ github.event_name == 'push' }}
         run: node scripts/fetch-standings.mjs ${{ inputs.dry_run && '--dry-run' || '' }}
       - name: Commit standings.json
         if: ${{ !inputs.dry_run }}

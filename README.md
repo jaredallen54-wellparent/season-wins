@@ -43,7 +43,7 @@ The GitHub Action publishes to Firebase Hosting when the repo has a `FIREBASE_SE
 
 | Task | How |
 |---|---|
-| Change how often standings update | Edit the one `cron:` line at the top of [`.github/workflows/site.yml`](.github/workflows/site.yml). Weekly is `"17 10 * * 1"`; daily is `"17 10 * * *"` (times are UTC). |
+| Change how often standings update | Edit the one `cron:` line at the top of [`.github/workflows/site.yml`](.github/workflows/site.yml). Daily (current) is `"17 10 * * *"`; weekly is `"17 10 * * 1"` (times are UTC). Standings also refresh whenever a change is published. |
 | Update standings right now | **Actions → Standings + deploy → Run workflow** |
 | The feed broke | GitHub emails you when the job fails. Meanwhile go to **Admin → Standings by hand**. The newer of your manual entry and the automatic feed always wins. |
 | Someone lost their edit code | **Admin → Players → Reset code**, then send them the new code |
