@@ -2,8 +2,13 @@ name: Standings + deploy
 
 on:
   schedule:
-    # ▼▼ STANDINGS SCHEDULE: the one line to change (times are UTC) ▼▼
-    - cron: "17 10 * * *"        # daily, 10:17 UTC (6:17 AM ET), after the night's games. Weekly (Mondays): "17 10 * * 1"
+    # ▼▼ STANDINGS SCHEDULE (times are UTC) ▼▼
+    # GitHub starts scheduled runs late or skips them when busy, so we run several times a day;
+    # a run only saves when records changed. First run 6:17 AM ET, then backups through the day.
+    - cron: "17 10 * * *"        # 6:17 AM ET
+    - cron: "47 12 * * *"        # 8:47 AM ET (backup)
+    - cron: "17 16 * * *"        # 12:17 PM ET (backup)
+    - cron: "17 21 * * *"        # 5:17 PM ET (backup; also catches stat corrections)
   workflow_dispatch:
     inputs:
       dry_run:

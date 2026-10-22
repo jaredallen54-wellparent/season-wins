@@ -124,7 +124,14 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     const path = new URL('../standings.json', import.meta.url);
     let prev = null;
     try { prev = JSON.parse(readFileSync(path, 'utf8')); } catch {}
-    writeFileSync(path, JSON.stringify(out, null, 2) + '\n');
-    console.log(prev && JSON.stringify(prev.teams) === JSON.stringify(out.teams) ? 'No W–L changes (timestamp refreshed).' : 'standings.json updated.');
+    // Several runs a day (GitHub's scheduler is unreliable): save only when records changed,
+    // or when the last save is more than 20 hours old (keeps the "updated" time fresh on off days).
+    const same = prev && JSON.stringify(prev.teams) === JSON.stringify(out.teams);
+    const ageH = prev ? (Date.now() - Date.parse(prev.updatedAt)) / 36e5 : Infinity;
+    if (same && ageH < 20) console.log(`No W–L changes; last saved ${ageH.toFixed(1)} h ago, leaving standings.json as is.`);
+    else {
+      writeFileSync(path, JSON.stringify(out, null, 2) + '\n');
+      console.log(same ? 'No W–L changes (timestamp refreshed).' : 'standings.json updated.');
+    }
   }
 }
